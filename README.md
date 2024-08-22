@@ -128,3 +128,12 @@ If you'd like to contribute to this project, please fork the repository and use 
 ## License
 
 This project is open-source and available under the MIT License.
+
+## Tags
+
+- Python
+- Video Renaming
+- Brave Search API
+- Automation
+- Docker
+- Cron Jobs
