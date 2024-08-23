@@ -52,6 +52,7 @@ If you prefer to run the script using Docker, follow these steps:
        container_name: batinapapka
        volumes:
          - /share/YOUR_VIDEO_FOLDER:/share
+         - YOUR_APP_FOLDER::/usr/src/app 
        command: >
          sh -c "
          apt-get update && 
