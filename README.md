@@ -66,6 +66,7 @@ If you prefer to run the script using Docker, follow these steps:
        working_dir: /usr/src/app
        stdin_open: true
        tty: true
+       restart: always
        networks:
          - rename_net
 
