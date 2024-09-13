@@ -33,12 +33,12 @@
    API_KEY = "YOUR_API_KEY"
    ```
 
-### Run Using Docker
+## Run Using Docker with Automatic Script Download
 
-If you prefer to run the script using Docker, follow these steps:
+If you prefer to run the script using Docker and want the script to be downloaded automatically from your GitHub repository when the container is created, follow these steps:
 
 1. **Set Up the Docker Environment:**
-   Ensure Docker is installed on your system.
+   Ensure Docker and Docker Compose are installed on your system.
 
 2. **Prepare the Docker Compose File:**
    Use the following Docker Compose configuration:
@@ -51,14 +51,14 @@ If you prefer to run the script using Docker, follow these steps:
        image: python:3.9-slim
        container_name: batinapapka
        volumes:
-         - /share/YOUR_VIDEO_FOLDER:/share
-         - YOUR_APP_FOLDER:/usr/src/app 
+         - /path/to/your/video/files:/videos
        command: >
          sh -c "
-         apt-get update && 
-         apt-get install -y cron iputils-ping vim nano mc &&
-         pip install requests beautifulsoup4 &&
-         echo '0 3 * * * /usr/local/bin/python /usr/src/app/batinapapka.py /share >> /var/log/cron.log 2>&1' > /etc/cron.d/rename_cron &&
+         apt-get update &&
+         apt-get install -y ffmpeg cron curl &&
+         pip install requests unidecode rapidfuzz scikit-learn &&
+         curl -o /usr/src/app/batinapapka.py https://raw.githubusercontent.com/davnozdu/batinapapka/main/batinapapkav2.py &&
+         echo '0 3 * * * /usr/local/bin/python /usr/src/app/batinapapka.py /videos --api-key YOUR_API_KEY >> /var/log/cron.log 2>&1' > /etc/cron.d/rename_cron &&
          chmod 0644 /etc/cron.d/rename_cron &&
          crontab /etc/cron.d/rename_cron &&
          touch /var/log/cron.log &&
@@ -74,7 +74,6 @@ If you prefer to run the script using Docker, follow these steps:
    networks:
      rename_net:
        driver: bridge
-   ```
 
 3. **Build and Run the Docker Container:**
    - Replace `/share/YOUR_VIDEO_FOLDER` with the path to the directory containing your video files.
