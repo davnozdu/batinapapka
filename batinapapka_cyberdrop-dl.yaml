@@ -1,0 +1,54 @@
+version: '3.7'  # Specify the Docker Compose version
+
+services:
+  rename_script:
+    image: python:3.11-slim-bookworm  #  Python 3.11
+    container_name: batinapapka2  # Name the container 'batinapapka'
+
+    # Mount the host directory to the container.
+    volumes:
+      - /share/video/:/videos
+
+    # Define the command to run in the container
+    command: |
+      sh -c "
+      apt-get update &&
+      apt-get install -y ffmpeg cron curl openssh-server tmux sudo python3-venv &&
+      pip install --upgrade pip &&
+      pip install requests unidecode rapidfuzz scikit-learn &&
+      curl -o /usr/src/app/batinapapka.py https://raw.githubusercontent.com/davnozdu/batinapapka/main/batinapapkav2.py &&
+      mkdir -p /usr/src/app/cyberdrop && cd /usr/src/app/cyberdrop &&
+      python3 -m venv venv &&
+      . venv/bin/activate &&
+      python3 -m pip install --upgrade pip &&
+      python3 -m pip uninstall -y -q -q cyberdrop-dl &&
+      python3 -m pip install --upgrade cyberdrop-dl-patched &&
+      ln -s /usr/src/app/cyberdrop/venv/bin/cyberdrop-dl /usr/local/bin/cyberdrop-dl &&
+      service ssh start &&
+      useradd -m -s /bin/bash davnozdu &&
+      echo 'user:[YOUR_PASSWORD]' | chpasswd &&
+      usermod -aG sudo user &&
+      echo '0 3 * * * /usr/local/bin/python /usr/src/app/batinapapka.py /videos --api-key [YOUR_API_KEY] >> /var/log/cron.log 2>&1' > /etc/cron.d/rename_cron &&
+      chmod 0644 /etc/cron.d/rename_cron &&
+      crontab /etc/cron.d/rename_cron &&
+      touch /var/log/cron.log &&
+      cron && tail -f /var/log/cron.log
+      "
+
+    working_dir: /usr/src/app  # Set the working directory to /usr/src/app
+    stdin_open: true  # Keep stdin open for interactive sessions (useful for debugging)
+    tty: true  # Allocate a pseudo-TTY (needed for interactive shells like bash or tmux)
+    restart: always  # Restart the container if it crashes or stops
+
+    # Expose port 22 for SSH access from the host machine
+    ports:
+      - "2222:22"  # Map port 2222 on the host to port 22 in the container for SSH
+
+    # Use a custom network for the service
+    networks:
+      - rename_net
+
+# Define a custom bridge network
+networks:
+  rename_net:
+    driver: bridge
