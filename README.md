@@ -48,7 +48,7 @@ If you prefer to run the script using Docker and want the script to be downloade
 
    services:
      rename_script:
-       image: python:3.9-slim-bullseye
+       image: python:3.12-slim-bookworm
        container_name: batinapapka
        volumes:
          - /path/to/your/video/files:/videos
