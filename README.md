@@ -57,7 +57,7 @@ If you prefer to run the script using Docker and want the script to be downloade
          apt-get update &&
          apt-get install -y ffmpeg cron curl &&
          pip install requests unidecode rapidfuzz scikit-learn &&
-         curl -o /usr/src/app/batinapapka.py https://raw.githubusercontent.com/davnozdu/batinapapka/main/batinapapkav4.py &&
+         curl -o /usr/src/app/batinapapka.py https://raw.githubusercontent.com/davnozdu/batinapapka/main/batinapapkav5.py &&
          echo '0 3 * * * /usr/local/bin/python /usr/src/app/batinapapka.py --api-key YOUR_API_KEY --searxng-url LINK_YOUR_SERVER /videos >> /var/log/cron.log 2>&1' > /etc/cron.d/rename_cron &&
          chmod 0644 /etc/cron.d/rename_cron &&
          crontab /etc/cron.d/rename_cron &&
