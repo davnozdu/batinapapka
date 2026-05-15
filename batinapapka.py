@@ -1,212 +1,546 @@
-import os
-import requests
+"""Rename adult video files based on online search results (Brave Search).
+
+Reads filenames from a directory, queries Brave Search, and renames each file
+to "<YYYY-MM-DD> <cleaned-title>.<ext>". Falls back to the file's mtime and a
+sanitized version of the original name when the search yields nothing usable.
+"""
+
+from __future__ import annotations
+
 import argparse
-from difflib import SequenceMatcher
-import time
-import re
-import pickle
+import fcntl
+import gzip
 import hashlib
+import json
 import logging
+import os
+import re
+import shutil
+import sys
+import time
+import unicodedata
+from dataclasses import asdict, dataclass
 from datetime import datetime
+from functools import lru_cache
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from urllib.parse import urlparse
 
-# Logging configuration
-LOG_FILE = 'file_renamer.log'
-logging.basicConfig(filename=LOG_FILE, level=logging.INFO, 
-                    format='%(asctime)s - %(levelname)s - %(message)s')
+import requests
+from rapidfuzz import fuzz
+from unidecode import unidecode
 
-# API Configuration
-BRAVE_SEARCH_API_URL = "https://api.search.brave.com/res/v1/web/search"
-API_KEY = "YOUR_API_KEY"
+LOG_FILE = "file_renamer.log"
 RENAMED_FILES_LOG = "renamed_files.txt"
-CACHE_FILE = "search_cache.pkl"
+CACHE_FILE = "search_cache.json.gz"
+CACHE_TTL_DAYS = 30
+SIMILARITY_THRESHOLD = 0.40
+MIN_FREE_SPACE_BYTES = 100 * 1024 * 1024
+REQUEST_TIMEOUT = 10
+BRAVE_SEARCH_API_URL = "https://api.search.brave.com/res/v1/web/search"
+BRAVE_RESULTS_PER_QUERY = 20  # Brave Search API caps `count` at 20.
 
-# List of supported video formats
-VIDEO_EXTENSIONS = [".mp4", ".avi", ".mov", ".mkv", ".flv", ".wmv"]
+# Telegram media filenames are 18-digit integers — searching them is pointless.
+NUMERIC_FILENAME_LEN = 18
 
-# List of popular video hosting sites to remove from titles
-VIDEO_HOSTINGS = [
+VIDEO_EXTENSIONS = frozenset({
+    ".mp4", ".avi", ".mov", ".mkv", ".flv", ".wmv", ".webm", ".mpeg", ".mpg",
+})
+
+VIDEO_HOSTINGS = (
     "YouTube", "Vimeo", "Dailymotion", "Twitch", "Facebook", "Instagram", "Twitter",
-    "TikTok", "Metacafe", "Vevo", "Hulu", "Netflix", "Pornhub", "Xvideos", "YouPorn",
-    "RedTube", "Porn.com", "XHamster", "Brazzers", "Naughty America", "SpankBang", 
-    "TNAFlix", "YouJizz", "Tube8", "JizzBunker", "KeezMovies", "Nuvid", "DrTuber",
-    "Yuvutu", "Xtube", "BangBros", "Mofos", "Reality Kings", "BadoinkVR", "PornHD", 
-    "ManyVids"
+    "Pornhub", "Xvideos", "YouPorn", "RedTube", "Porn.com", "XHamster", "Brazzers",
+    "SpankBang", "TNAFlix", "Tube8", "JizzBunker", "KeezMovies", "Nuvid", "DrTuber",
+    "BangBros", "Mofos", "Reality Kings", "PornHD", "ManyVids", "PornTrex", "EPORNER",
+    "xHamsterLive", "Chaturbate", "CamSoda", "MyFreeCams", "LiveJasmin",
+    "VRBangers", "WankzVR", "AdultTime", "PornDoe", "Beeg", "SunPorno",
+    "Porn300", "PornOne", "MegaPorn", "EMPFlix", "Txxx", "HDZog", "AlphaPorno",
+    "OnlyFans", "Manyvids", "ModelHub", "XHamster Premium", "PornhubPremium",
+)
+
+# Exact hostnames (or their subdomains) to drop from search results.
+EXCLUDED_HOSTS = frozenset({
+    "wikipedia.org", "imdb.com",
+    "kinopoisk.ru", "ivi.ru", "megogo.net", "okko.tv", "more.tv", "tvzavr.ru",
+    "reddit.com", "facebook.com", "twitter.com", "x.com", "instagram.com",
+    "tiktok.com", "pinterest.com", "linkedin.com", "tumblr.com",
+})
+
+_CLEAN_PATTERNS = [
+    re.compile(p, re.IGNORECASE) for p in (
+        r"\b(360p|480p|720p|1080p|2160p|4K|8K|HD|FHD|UHD)\b",
+        r"\b(HD|HQ|HDRip|BRRip|DVDRip|WEBRip|BluRay)\b",
+        r"\b(x264|h264|x265|h265|hevc|avc|mp3|aac|ac3|dts|flac)\b",
+        r"\b(MP4|MKV|AVI|WMV|FLV|MPEG|MPG)\b",
+        r"\b(Official|Video|Full|Complete|Scene|Version|Edit|Cut)\b",
+        r"[\[\(\{].*?[\]\)\}]",
+        r"\b\d{2,4}[-/.]\d{2}[-/.]\d{2,4}\b",
+        r"\b(com|net|org|xxx)\b",
+        r"\b\d{3,4}x\d{3,4}\b",
+        r"\b\d+(\.\d+)?\s*(MB|GB|TB)\b",
+    )
 ]
 
-EXCLUDED_SITES = ["Wikipedia", "IMDb", "Rotten Tomatoes", "Metacritic", "AllMusic", "Fandom", "news"]
+_HOSTINGS_RE = re.compile(
+    r"\b(" + "|".join(re.escape(h) for h in VIDEO_HOSTINGS) + r")\b",
+    re.IGNORECASE,
+)
+_YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
+_NON_WORD_RE = re.compile(r"[^\w\s-]")
+_WS_RE = re.compile(r"\s+")
+_LONG_NUM_RE = re.compile(r"\b\d{6,}\b")
+_SINGLE_LETTER_RE = re.compile(r"\b[a-zA-Z]\b")
+_SEPARATOR_RE = re.compile(r"[_\-]+")
+_UNSAFE_FILENAME_RE = re.compile(r'[<>:"/\\|?*]')
 
-def is_numeric_sequence(filename):
-    base_name = os.path.splitext(filename)[0]
-    return len(base_name) == 18 and base_name.isdigit()
+logger = logging.getLogger(__name__)
 
-def load_cache():
-    """Loads the cache from a file."""
-    if os.path.exists(CACHE_FILE):
-        with open(CACHE_FILE, "rb") as f:
-            return pickle.load(f)
-    return {}
 
-def save_cache(cache):
-    """Saves the cache to a file."""
-    with open(CACHE_FILE, "wb") as f:
-        pickle.dump(cache, f)
+class CompressedCache:
+    """On-disk cache: gzipped JSON, TTL-checked, atomic save with file lock."""
 
-def generate_cache_key(query):
-    """Generates a unique key for the cache based on the query."""
-    return hashlib.md5(query.encode('utf-8')).hexdigest()
+    def __init__(self, path: str, ttl_days: int = CACHE_TTL_DAYS):
+        self.path = Path(path)
+        self.ttl_days = ttl_days
+        self.cache: Dict[str, Any] = {}
+        self.timestamps: Dict[str, str] = {}
+        self._load()
 
-def search_brave(query, cache):
-    """Search function using the Brave Search API with caching."""
-    cache_key = generate_cache_key(query)
-    if cache_key in cache:
-        logging.info(f'Using cached result for query: {query}')
-        return cache[cache_key]
-
-    headers = {
-        "Accept": "application/json",
-        "X-Subscription-Token": API_KEY
-    }
-    params = {
-        "q": query,
-        "count": 20,
-        "safesearch": "off",
-    }
-    response = requests.get(BRAVE_SEARCH_API_URL, headers=headers, params=params)
-    if response.status_code == 200:
-        results = response.json().get("web", {}).get("results", [])
-        filtered_results = [
-            (result["title"], result.get("page_age"), result.get("url")) for result in results
-            if not any(excluded_site.lower() in result["url"].lower() for excluded_site in EXCLUDED_SITES)
-        ]
-        cache[cache_key] = filtered_results
-        save_cache(cache)
-        return filtered_results
-    return []
-
-def clean_title(title):
-    """Cleans the title by removing special characters and video hosting names."""
-    title = title.split("|")[0].strip()
-    for host in VIDEO_HOSTINGS:
-        title = re.sub(r'\b{}\b'.format(re.escape(host)), '', title, flags=re.IGNORECASE)
-    title = re.sub(r'[^a-zA-Z0-9\s]', '', title)
-    title = re.sub(r'\s+', ' ', title).strip()
-    return title
-
-def choose_best_title(base_name, titles_with_dates):
-    """Selects the most appropriate title from the list."""
-    best_match = None
-    highest_similarity = 0
-    best_date = None
-
-    for result in titles_with_dates:
-        title, page_age, url = result
-        clean_title_str = clean_title(title)
-        similarity = similar(base_name.lower(), clean_title_str.lower())
-        if similarity > highest_similarity:
-            highest_similarity = similarity
-            best_match = clean_title_str
-            if page_age:
-                best_date = page_age[:10]  # Extract only YYYY-MM-DD
-
-    return best_date, best_match
-
-def similar(a, b):
-    """Calculates the similarity between two strings."""
-    return SequenceMatcher(None, a, b).ratio()
-
-def get_file_modification_date(file_path):
-    """Returns the file modification date in YYYY-MM-DD format."""
-    modification_time = os.path.getmtime(file_path)
-    return datetime.fromtimestamp(modification_time).strftime('%Y-%m-%d')
-
-def load_renamed_files_log():
-    """Loads the list of already renamed files from the log."""
-    if os.path.exists(RENAMED_FILES_LOG):
-        with open(RENAMED_FILES_LOG, "r") as file:
-            return set(line.strip() for line in file)
-    return set()
-
-def save_renamed_file_log(filename):
-    """Saves the renamed file to the log."""
-    with open(RENAMED_FILES_LOG, "a") as file:
-        file.write(filename + "\n")
-
-def trim_log_file():
-    """Trims the log file to the last 100 lines."""
-    try:
-        with open(LOG_FILE, 'r') as file:
-            lines = file.readlines()
-        if len(lines) > 100:
-            with open(LOG_FILE, 'w') as file:
-                file.writelines(lines[-100:])
-    except Exception as e:
-        logging.error(f'Error trimming log file: {e}')
-
-def has_date_prefix(filename):
-    """Checks if the file name starts with a date in the format YYYY-MM-DD."""
-    return re.match(r'^\d{4}-\d{2}-\d{2}', filename) is not None
-
-def rename_video_files_in_directory(directory):
-    """Renames video files in the directory based on search results."""
-    renamed_files = load_renamed_files_log()
-    cache = load_cache()
-    
-    for filename in os.listdir(directory):
+    def _load(self) -> None:
+        if not self.path.exists():
+            return
         try:
-            file_path = os.path.join(directory, filename)
-            file_extension = os.path.splitext(filename)[1].lower()
+            with gzip.open(self.path, "rt", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("cache root is not a dict")
+            self.cache = data.get("cache", {})
+            self.timestamps = data.get("timestamps", {})
+            self._cleanup_expired()
+        except (OSError, ValueError, json.JSONDecodeError) as e:
+            logger.error("Corrupt cache (%s) — starting fresh", e)
+            self.cache, self.timestamps = {}, {}
 
-            if os.path.isfile(file_path) and file_extension in VIDEO_EXTENSIONS:
-                if filename in renamed_files:
-                    logging.info(f'File "{filename}" has already been renamed, skipping.')
+    def save(self) -> None:
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        try:
+            with open(tmp, "wb") as raw:
+                fcntl.flock(raw.fileno(), fcntl.LOCK_EX)
+                with gzip.GzipFile(fileobj=raw, mode="wb") as gz:
+                    payload = json.dumps(
+                        {"cache": self.cache, "timestamps": self.timestamps},
+                        ensure_ascii=False,
+                    ).encode("utf-8")
+                    gz.write(payload)
+            os.replace(tmp, self.path)
+        except OSError as e:
+            logger.error("Cache save failed: %s", e)
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+
+    def _cleanup_expired(self) -> None:
+        now = datetime.now()
+        expired = [
+            k for k, ts in self.timestamps.items()
+            if (now - datetime.fromisoformat(ts)).days > self.ttl_days
+        ]
+        for k in expired:
+            self.cache.pop(k, None)
+            self.timestamps.pop(k, None)
+
+    def get(self, key: str) -> Optional[Any]:
+        ts = self.timestamps.get(key)
+        if not ts:
+            return None
+        if (datetime.now() - datetime.fromisoformat(ts)).days > self.ttl_days:
+            return None
+        return self.cache.get(key)
+
+    def set(self, key: str, value: Any) -> None:
+        self.cache[key] = value
+        self.timestamps[key] = datetime.now().isoformat()
+
+
+def _host_excluded(url: str) -> bool:
+    host = (urlparse(url).hostname or "").lower()
+    if host.startswith("www."):
+        host = host[4:]
+    for blocked in EXCLUDED_HOSTS:
+        if host == blocked or host.endswith("." + blocked):
+            return True
+    return False
+
+
+def _normalize_results(items: Iterable[dict]) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    for item in items:
+        url = item.get("url", "")
+        if _host_excluded(url):
+            continue
+        out.append({
+            "title": item.get("title", "") or "",
+            "page_age": item.get("page_age") or "",
+            "url": url,
+        })
+    return out
+
+
+class BraveSearchClient:
+    QUERY_TEMPLATE = '"{q}" adult video'
+
+    def __init__(self, api_key: str, cache: CompressedCache):
+        self.cache = cache
+        self.session = requests.Session()
+        self.session.headers.update({
+            "Accept": "application/json",
+            "X-Subscription-Token": api_key,
+        })
+        self._last_request_ts = 0.0
+        self.retry_count = 3
+
+    def _throttle(self) -> None:
+        elapsed = time.time() - self._last_request_ts
+        if elapsed < 1.0:
+            time.sleep(1.0 - elapsed)
+        self._last_request_ts = time.time()
+
+    def _key(self, full_query: str) -> str:
+        return hashlib.sha1(f"brave:{full_query}".encode("utf-8")).hexdigest()
+
+    def search(self, query: str) -> List[Dict[str, str]]:
+        full_query = self.QUERY_TEMPLATE.format(q=query)
+        key = self._key(full_query)
+        cached = self.cache.get(key)
+        if cached is not None:
+            logger.info("Brave cache hit: %s", query)
+            return cached
+
+        for attempt in range(1, self.retry_count + 1):
+            try:
+                self._throttle()
+                resp = self.session.get(
+                    BRAVE_SEARCH_API_URL,
+                    params={"q": full_query, "count": BRAVE_RESULTS_PER_QUERY, "safesearch": "off"},
+                    timeout=REQUEST_TIMEOUT,
+                )
+                if resp.status_code in {401, 403}:
+                    logger.error("Brave: invalid API key (HTTP %s)", resp.status_code)
+                    return []
+                if resp.status_code == 429:
+                    delay = float(resp.headers.get("Retry-After", attempt * 2))
+                    logger.warning("Brave rate-limited, sleeping %.1fs", delay)
+                    time.sleep(delay)
+                    continue
+                if resp.status_code >= 500:
+                    logger.warning("Brave server error %s (attempt %d/%d)",
+                                   resp.status_code, attempt, self.retry_count)
+                    time.sleep(attempt * 2)
+                    continue
+                resp.raise_for_status()
+                results = _normalize_results(
+                    resp.json().get("web", {}).get("results", [])
+                )
+                self.cache.set(key, results)
+                return results
+            except requests.RequestException as e:
+                logger.warning("Brave request failed (%d/%d): %s",
+                               attempt, self.retry_count, e)
+                time.sleep(attempt * 2)
+        return []
+
+
+class TitleProcessor:
+    @lru_cache(maxsize=4096)
+    def clean_title(self, title: str, is_original_file: bool = False) -> str:
+        title = title.split("|", 1)[0].strip()
+        title = _HOSTINGS_RE.sub("", title)
+        for pat in _CLEAN_PATTERNS:
+            title = pat.sub("", title)
+
+        year_match = _YEAR_RE.search(title)
+        year = year_match.group() if year_match else None
+
+        title = _NON_WORD_RE.sub(" ", title)
+        title = _WS_RE.sub(" ", title)
+        title = unicodedata.normalize("NFKD", title)
+        title = unidecode(title).encode("ascii", errors="ignore").decode()
+
+        if is_original_file:
+            title = _LONG_NUM_RE.sub("", title)
+            title = _SINGLE_LETTER_RE.sub("", title)
+            title = _SEPARATOR_RE.sub(" ", title)
+
+        if year and year not in title:
+            title = f"{title} {year}"
+
+        title = _WS_RE.sub(" ", title).strip()
+        if len(title) < 3:
+            return "unnamed_video" if is_original_file else title
+        return title
+
+    def _similarity(self, a: str, b: str) -> float:
+        ca = self.clean_title(a)
+        cb = self.clean_title(b)
+        if not ca or not cb:
+            return 0.0
+        # token_set_ratio handles word reordering, duplicates and partial overlap
+        # well enough that the previous TF-IDF + multi-metric blend isn't needed.
+        return fuzz.token_set_ratio(ca, cb) / 100.0
+
+    def choose_best(
+        self, original: str, results: List[Dict[str, str]]
+    ) -> Tuple[Optional[str], Optional[str]]:
+        best_score, best_title, best_date = 0.0, None, None
+        for r in results:
+            title = r.get("title", "")
+            score = self._similarity(original, title)
+            if len(title) < 10 or len(title) > 100:
+                score *= 0.8
+            if score > best_score:
+                best_score = score
+                best_title = self.clean_title(title)
+                best_date = (r.get("page_age") or "")[:10] or None
+        if best_score < SIMILARITY_THRESHOLD:
+            return None, None
+        return best_date, best_title
+
+
+@dataclass
+class Stats:
+    processed: int = 0
+    renamed: int = 0
+    skipped: int = 0
+    errors: int = 0
+    brave_queries_hit: int = 0
+    no_search_results: int = 0
+    using_original_name: int = 0
+
+
+class VideoFileRenamer:
+    def __init__(self, brave_client: BraveSearchClient, cache: CompressedCache):
+        self.cache = cache
+        self.brave_client = brave_client
+        self.title = TitleProcessor()
+        self.renamed_files = self._load_renamed()
+        self.stats = Stats()
+
+    def _load_renamed(self) -> Set[str]:
+        if not os.path.exists(RENAMED_FILES_LOG):
+            return set()
+        try:
+            with open(RENAMED_FILES_LOG, "r", encoding="utf-8") as f:
+                return {line.strip() for line in f if line.strip()}
+        except OSError as e:
+            logger.error("Cannot load %s: %s", RENAMED_FILES_LOG, e)
+            return set()
+
+    def _mark_renamed(self, name: str) -> None:
+        try:
+            with open(RENAMED_FILES_LOG, "a", encoding="utf-8") as f:
+                f.write(name + "\n")
+            self.renamed_files.add(name)
+        except OSError as e:
+            logger.error("Cannot append to %s: %s", RENAMED_FILES_LOG, e)
+
+    @staticmethod
+    def _safe(name: str) -> str:
+        name = _UNSAFE_FILENAME_RE.sub("_", name)
+        if len(name) > 255:
+            base, ext = os.path.splitext(name)
+            name = base[: 255 - len(ext)] + ext
+        return name
+
+    @staticmethod
+    def _unique(directory: str, name: str) -> str:
+        base, ext = os.path.splitext(name)
+        candidate, counter = name, 1
+        while os.path.exists(os.path.join(directory, candidate)):
+            candidate = f"{base}_{counter}{ext}"
+            counter += 1
+        return candidate
+
+    def _should_process(self, filename: str, force: bool) -> bool:
+        if filename.startswith("."):
+            return False
+        ext = os.path.splitext(filename)[1].lower()
+        if ext not in VIDEO_EXTENSIONS:
+            return False
+        if not force and filename in self.renamed_files:
+            self.stats.skipped += 1
+            return False
+        stem = os.path.splitext(filename)[0]
+        if len(stem) == NUMERIC_FILENAME_LEN and stem.isdigit():
+            self.stats.skipped += 1
+            return False
+        return True
+
+    def _search(self, query: str) -> List[Dict[str, str]]:
+        results = self.brave_client.search(query)
+        if results:
+            self.stats.brave_queries_hit += 1
+            logger.info("Brave returned %d results", len(results))
+        seen, unique = set(), []
+        for r in results:
+            key = (r.get("url", ""), r.get("title", "").lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(r)
+        return unique
+
+    def _backup_mapping(self, directory: str, old: str, new: str) -> None:
+        backup = Path(directory) / ".filename_mapping.json"
+        mapping: Dict[str, str] = {}
+        if backup.exists():
+            try:
+                mapping = json.loads(backup.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as e:
+                logger.error("Cannot read %s: %s", backup, e)
+        mapping[new] = old
+        try:
+            backup.write_text(
+                json.dumps(mapping, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except OSError as e:
+            logger.error("Cannot write %s: %s", backup, e)
+
+    def process(self, directory: str, force: bool = False) -> None:
+        if not os.path.isdir(directory):
+            raise ValueError(f"Not a directory: {directory}")
+        if shutil.disk_usage(directory).free < MIN_FREE_SPACE_BYTES:
+            raise OSError(f"Less than {MIN_FREE_SPACE_BYTES // (1024 * 1024)}MB free")
+
+        logger.info("Starting rename in %s", directory)
+        started = time.time()
+
+        for filename in os.listdir(directory):
+            try:
+                if not self._should_process(filename, force):
+                    continue
+                self.stats.processed += 1
+
+                path = os.path.join(directory, filename)
+                base = os.path.splitext(filename)[0]
+                ext = os.path.splitext(filename)[1]
+
+                try:
+                    with open(path, "rb"):
+                        pass
+                except PermissionError:
+                    logger.error("File locked: %s", filename)
+                    self.stats.errors += 1
                     continue
 
-                if is_numeric_sequence(filename):
-                    logging.info(f'File "{filename}" is a numeric sequence, skipping.')
-                    continue
+                file_date = datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d")
 
-                base_name = os.path.splitext(filename)[0]
+                logger.info("Processing %s", filename)
+                results = self._search(base)
 
-                if has_date_prefix(base_name):
-                    logging.info(f'File "{filename}" already contains a date, skipping.')
-                    continue
-
-                titles_with_dates = search_brave(base_name, cache)
-                best_date, new_name = choose_best_title(base_name, titles_with_dates)
-
-                # Use the date from the internet if found, otherwise use the file modification date
-                if not best_date:
-                    best_date = get_file_modification_date(file_path)
-
-                if new_name:
-                    new_file_name = f"{best_date} {new_name}{file_extension}"
-                    
-                    new_file_path = os.path.join(directory, new_file_name)
-                    
-                    # Check if a file with the same name already exists
-                    if os.path.exists(new_file_path):
-                        base, ext = os.path.splitext(new_file_name)
-                        counter = 1
-                        while os.path.exists(new_file_path):
-                            new_file_name = f"{base}_{counter}{ext}"
-                            new_file_path = os.path.join(directory, new_file_name)
-                            counter += 1
-                    
-                    os.rename(file_path, new_file_path)
-                    logging.info(f'File "{filename}" was renamed to "{new_file_name}"')
-                    save_renamed_file_log(new_file_name)
+                if results:
+                    date, new_title = self.title.choose_best(base, results)
+                    if not new_title:
+                        new_title = self.title.clean_title(base, is_original_file=True)
+                        date = file_date
+                        self.stats.using_original_name += 1
+                    elif not date:
+                        date = file_date
                 else:
-                    logging.warning(f'Could not find a suitable title for file "{filename}".')
-            
-            time.sleep(1)
-            trim_log_file()  # Trim the log file after each cycle
-        except Exception as e:
-            logging.error(f'Error processing file "{filename}": {e}')
+                    new_title = self.title.clean_title(base, is_original_file=True)
+                    date = file_date
+                    self.stats.no_search_results += 1
+
+                new_filename = self._unique(
+                    directory, self._safe(f"{date} {new_title}{ext}")
+                )
+                new_path = os.path.join(directory, new_filename)
+                self._backup_mapping(directory, filename, new_filename)
+                shutil.move(path, new_path)
+                self._mark_renamed(new_filename)
+                logger.info('Renamed "%s" -> "%s"', filename, new_filename)
+                self.stats.renamed += 1
+
+            except Exception as e:  # noqa: BLE001 — never let one bad file kill the run
+                logger.exception("Error processing %s: %s", filename, e)
+                self.stats.errors += 1
+
+        self.cache.save()
+        logger.info(
+            "Done in %.2fs. Stats: %s",
+            time.time() - started, json.dumps(asdict(self.stats)),
+        )
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Rename adult video files based on Brave Search results.",
+        formatter_class=argparse.RawTextHelpFormatter,
+    )
+    parser.add_argument("directory", help="Path to the directory with video files")
+    parser.add_argument(
+        "--api-key", default=os.getenv("BRAVE_API_KEY"),
+        help="Brave Search API key (or BRAVE_API_KEY env var)",
+    )
+    parser.add_argument("--clean-cache", action="store_true",
+                        help="Drop the on-disk cache before processing")
+    parser.add_argument("--force", action="store_true",
+                        help="Re-process files already listed in renamed_files.txt")
+    parser.add_argument("--debug", action="store_true", help="Verbose logging")
+    return parser.parse_args()
+
+
+def configure_logging(debug: bool) -> None:
+    handler = RotatingFileHandler(LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=7)
+    handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+    root = logging.getLogger()
+    root.handlers.clear()
+    root.addHandler(handler)
+    root.setLevel(logging.DEBUG if debug else logging.INFO)
+
+
+def main() -> int:
+    args = parse_args()
+    configure_logging(args.debug)
+
+    if not args.api_key:
+        logger.error("Brave API key missing (use --api-key or BRAVE_API_KEY env var)")
+        return 2
+    if not os.path.isdir(args.directory):
+        logger.error("Not a directory: %s", args.directory)
+        return 2
+    if not os.access(args.directory, os.W_OK):
+        logger.error("No write access to %s", args.directory)
+        return 2
+    if shutil.disk_usage(args.directory).free < MIN_FREE_SPACE_BYTES:
+        logger.error("Less than %dMB free on %s",
+                     MIN_FREE_SPACE_BYTES // (1024 * 1024), args.directory)
+        return 2
+
+    if args.clean_cache:
+        try:
+            Path(CACHE_FILE).unlink(missing_ok=True)
+            logger.info("Cache cleared")
+        except OSError as e:
+            logger.error("Cannot clear cache: %s", e)
+
+    cache = CompressedCache(CACHE_FILE, CACHE_TTL_DAYS)
+    brave = BraveSearchClient(args.api_key, cache)
+    renamer = VideoFileRenamer(brave, cache)
+    try:
+        renamer.process(args.directory, force=args.force)
+    except KeyboardInterrupt:
+        logger.info("Interrupted by user")
+        cache.save()
+        return 130
+
+    print("\nRenaming completed:")
+    for k, v in asdict(renamer.stats).items():
+        print(f"  {k}: {v}")
+    return 0
+
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Script for renaming video files based on search results.")
-    parser.add_argument("directory", type=str, help="Path to the directory with video files")
-    
-    args = parser.parse_args()
-    
-    rename_video_files_in_directory(args.directory)
+    sys.exit(main())

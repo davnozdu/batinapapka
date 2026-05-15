@@ -1,0 +1,34 @@
+services:
+  batinapapka:
+    build: .
+    image: batinapapka:latest
+    container_name: batinapapka
+    restart: unless-stopped
+    environment:
+      BRAVE_API_KEY: ${BRAVE_API_KEY:?set BRAVE_API_KEY in .env or shell}
+      CRON_SCHEDULE: ${CRON_SCHEDULE:-0 3 * * *}
+    volumes:
+      - ${VIDEO_DIR:?set VIDEO_DIR in .env or shell}:/videos
+      - batinapapka_state:/state
+    working_dir: /state
+    # Override the image's ENTRYPOINT: install a crontab on startup, do an
+    # immediate run so the container is useful before the first cron tick,
+    # then hand off to cron and tail the log forever.
+    entrypoint:
+      - /usr/bin/tini
+      - --
+      - /bin/sh
+      - -euc
+      - |
+        printf '%s\n' \
+          'BRAVE_API_KEY=${BRAVE_API_KEY}' \
+          "${CRON_SCHEDULE} root cd /state && /usr/local/bin/python /app/batinapapka.py /videos >> /state/cron.log 2>&1" \
+          > /etc/cron.d/batinapapka
+        chmod 0644 /etc/cron.d/batinapapka
+        touch /state/cron.log
+        python /app/batinapapka.py /videos || true
+        cron
+        exec tail -F /state/cron.log
+
+volumes:
+  batinapapka_state:

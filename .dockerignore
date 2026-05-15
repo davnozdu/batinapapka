@@ -1,0 +1,13 @@
+.git
+.gitignore
+.dockerignore
+README.md
+LICENSE
+*.log
+*.pkl
+*.json.gz
+renamed_files.txt
+__pycache__
+*.pyc
+.venv
+venv

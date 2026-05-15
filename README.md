@@ -1,140 +1,98 @@
-
 # BatinaPapka
 
-**BatinaPapka** is a Python script designed to automatically rename video files in a specified directory based on search results from the Brave Search API. The script cleans up filenames by removing special characters, video hosting site names, and adds the publication date from search results. If the date cannot be found online, it defaults to the file's modification date.
+**BatinaPapka** is a Python script that renames video files in a directory based on results from the Brave Search API. It strips junk (resolutions, codecs, hosting names, bracketed tags), normalizes Unicode, and prefixes the chosen title with the publication date — or, when nothing is found, with the file's modification date.
 
 ## Features
 
-- **Automatic Renaming**: Renames video files using titles and dates found via Brave Search API.
-- **Date Handling**: Prioritizes online publication dates but uses file modification dates if none are found.
-- **Cache Implementation**: Caches API responses to reduce redundant API calls.
-- **File Extension Support**: Supports common video formats such as `.mp4`, `.avi`, `.mov`, `.mkv`, `.flv`, and `.wmv`.
-- **Log Management**: Maintains a log file of renamed files and trims the log to the last 100 lines to save space.
-- **Exclusion Filters**: Filters out irrelevant results like Wikipedia, IMDb, and other non-video hosting sites.
+- **Automatic Renaming** — picks the best-matching online title using fuzzy similarity (`rapidfuzz`).
+- **Date Handling** — prefers the page's publication date; falls back to mtime.
+- **Cached search** — gzipped JSON cache with TTL, atomic writes, file-locked.
+- **Format support** — `.mp4`, `.avi`, `.mov`, `.mkv`, `.flv`, `.wmv`, `.webm`, `.mpeg`, `.mpg`.
+- **Rotating log** — `file_renamer.log`, 10 MB × 7 files.
+- **Host-level filter** — drops results from Wikipedia/IMDb/social platforms by exact-hostname match (no false-positive substring filtering).
+- **Reversible** — every rename is recorded in `.filename_mapping.json` next to the videos.
 
-## Installation
+## Install (bare metal)
 
-### Download and Run the Script
+Requires Python 3.10+.
 
-1. **Download the Script:**
-   - Download the `batinapapka.py` file from the repository.
-   - Save it to a directory on your computer.
+```bash
+git clone https://github.com/davnozdu/batinapapka.git
+cd batinapapka
+pip install -r requirements.txt
+```
 
-2. **Install Required Python Packages:**
-   Ensure you have Python 3 installed. Install the necessary dependencies using pip:
-   ```bash
-   pip install requests
-   ```
+Get a Brave API key at <https://brave.com/search/api/>, then:
 
-3. **Set Your Brave API Key:**
-   Open the `batinapapka.py` script in your favorite text editor and replace `"YOUR_API_KEY"` with your actual Brave API key.
+```bash
+export BRAVE_API_KEY=...your key...
+python batinapapka.py /path/to/your/video/files
+```
 
-   ```python
-   API_KEY = "YOUR_API_KEY"
-   ```
+CLI flags:
 
-## Run Using Docker with Automatic Script Download
+| Flag | Description |
+| --- | --- |
+| `--api-key KEY` | Brave Search API key (or set `BRAVE_API_KEY`). |
+| `--clean-cache` | Drop the on-disk cache before processing. |
+| `--force` | Re-process files already listed in `renamed_files.txt`. |
+| `--debug` | Verbose logging. |
 
-If you prefer to run the script using Docker and want the script to be downloaded automatically from your GitHub repository when the container is created, follow these steps:
+## Run with Docker (recommended)
 
-1. **Set Up the Docker Environment:**
-   Ensure Docker and Docker Compose are installed on your system.
+The repo ships with a `Dockerfile` and `docker-compose.yml`. Secrets stay in `.env`, the image is built from pinned dependencies, and a cron job re-runs the renamer on a schedule.
 
-2. **Prepare the Docker Compose File:**
-   Use the following Docker Compose configuration:
+```bash
+cp .env.example .env
+# edit .env — at minimum set BRAVE_API_KEY and VIDEO_DIR
 
-   ```yaml
-   version: '3.7'
+docker compose up -d --build
+docker compose logs -f batinapapka
+```
 
-   services:
-     rename_script:
-       image: python:3.12-slim-bookworm
-       container_name: batinapapka
-       volumes:
-         - /path/to/your/video/files:/videos
-       command: >
-         sh -c "
-         apt-get update &&
-         apt-get install -y ffmpeg cron curl &&
-         pip install requests unidecode rapidfuzz scikit-learn &&
-         curl -o /usr/src/app/batinapapka.py https://raw.githubusercontent.com/davnozdu/batinapapka/main/batinapapkav5.py &&
-         echo '0 3 * * * /usr/local/bin/python /usr/src/app/batinapapka.py --api-key YOUR_API_KEY --searxng-url LINK_YOUR_SERVER /videos >> /var/log/cron.log 2>&1' > /etc/cron.d/rename_cron &&
-         chmod 0644 /etc/cron.d/rename_cron &&
-         crontab /etc/cron.d/rename_cron &&
-         touch /var/log/cron.log &&
-         cron && tail -f /var/log/cron.log
-         "
-       working_dir: /usr/src/app
-       stdin_open: true
-       tty: true
-       restart: always
-       networks:
-         - rename_net
+The container does one immediate run on startup, then runs again on `CRON_SCHEDULE` (default: `0 3 * * *` — every day at 03:00). Cache, log and the renamed-files index live in the named volume `batinapapka_state`, so they survive recreates.
 
-   networks:
-     rename_net:
-       driver: bridge
+## Run combined with cyberdrop-dl
 
-3. **Build and Run the Docker Container:**
-   - Replace `/share/YOUR_VIDEO_FOLDER` with the path to the directory containing your video files.
-   - Deploy the stack or use the following command to start the container:
-     ```bash
-     docker-compose up -d
-     ```
+`batinapapka_cyberdrop-dl.yaml` adds `cyberdrop-dl-patched` and an SSH side-car for interactive use. Same `.env` plus two extra variables:
 
-   The script will run daily at 3:00 AM, renaming any new video files according to the Brave Search results.
+```env
+SHELL_USER=youruser
+SHELL_PASSWORD=...
+```
 
-## How to Get Your Brave API Key
+Then:
 
-1. **Sign up for the Brave Search API:**
-   - Visit the [Brave Search API](https://brave.com/search/api/) page.
-   - Sign up for an account if you don't have one.
-   - Follow the instructions to obtain your API key.
+```bash
+docker compose -f batinapapka_cyberdrop-dl.yaml up -d
+ssh -p 2222 youruser@host
+```
 
-2. **Add the API Key to the Script:**
-   - Replace the placeholder in the script with your API key.
-
-## Usage
-
-1. **Run the Script Manually:**
-   To rename video files in a directory, run the following command:
-
-   ```bash
-   python batinapapka.py /path/to/your/video/files
-   ```
-
-2. **Run the Script via Docker:**
-   Once the Docker container is running, it will automatically rename files in the specified directory based on the schedule set in the Docker Compose file.
+The script URL is pinned to `BATINAPAPKA_REF` (default `main`). For production set it to a tagged release so a container restart can never silently pull a breaking change.
 
 ## Example
 
-Before running the script:
+Before:
+
 ```
-/path/to/your/video/files
+/videos
 ├── video123.mp4
 ├── movie_trailer.avi
 ```
 
-After running the script:
+After:
+
 ```
-/path/to/your/video/files
+/videos
 ├── 2024-01-01 Example Video Title.mp4
 ├── 2023-12-31 Another Video Title.avi
+├── .filename_mapping.json   # reverse-lookup of new → original names
 ```
 
 ## Contributing
 
-If you'd like to contribute to this project, please fork the repository and use a feature branch. Pull requests are welcome.
+Fork, branch, PR. Style: standard library + `requests`/`rapidfuzz`/`Unidecode`; no heavy ML deps.
 
 ## License
 
-This project is open-source and available under the MIT License.
-
-## Tags
-
-- Python
-- Video Renaming
-- Brave Search API
-- Automation
-- Docker
-- Cron Jobs
+MIT — see `LICENSE`.
