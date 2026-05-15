@@ -9,7 +9,7 @@ services:
     #   docker compose pull       → pulls the published image instead
     #   docker compose up         → tries pull first; if absent, builds
     build: .
-    image: ghcr.io/davnozdu/batinapapka:${IMAGE_TAG:-latest}
+    image: ghcr.io/davnozdu/batinapapka:latest
     container_name: batinapapka
     restart: unless-stopped
 

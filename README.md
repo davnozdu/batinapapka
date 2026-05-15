@@ -120,16 +120,15 @@ BRAVE_API_KEY=...                       # https://brave.com/search/api/
 CRON_SCHEDULE=0 3 * * *                 # cron line for the recurring run.
                                         # Set CRON_SCHEDULE= (empty) to make
                                         # the container a one-shot run.
-IMAGE_TAG=1.2.3                         # pin a specific image (defaults to latest)
 ```
+
+The compose files pin `image:` to `:latest`. If you want to lock onto a specific version (e.g. `1.0.0`), edit the `image:` line in the compose file directly.
 
 ### Updating
 
 ```bash
 docker compose pull && docker compose up -d
 ```
-
-If you pinned `IMAGE_TAG=1.2.3` in `.env`, bump it and rerun — `pull` will only fetch the new tag.
 
 ### Run once, ad-hoc (no compose)
 
@@ -162,6 +161,16 @@ ssh -p 2222 "${SHELL_USER}"@host    # cyberdrop-dl is on PATH inside
 ```
 
 This image is amd64-only (some `cyberdrop-dl-patched` transitive deps have no prebuilt arm64 wheels). The slim `batinapapka` image stays multi-arch.
+
+**Persistent cyberdrop state.** On startup the entrypoint sets up symlinks inside the SSH user's home directory so cyberdrop-dl reads/writes a location that survives `docker compose down && up`:
+
+| In the container | Backed by (on the host) |
+| --- | --- |
+| `~/Downloads` → `/videos` | the bind-mounted videos folder |
+| `~/AppData`  → `/state/cyberdrop/AppData` | `batinapapka_state` named volume |
+| `~/URLs.txt` → `/state/cyberdrop/URLs.txt` | `batinapapka_state` named volume |
+
+So `cyberdrop-dl` keeps its config (`AppData/Configs/Default/settings.yaml`), its cache DB (`AppData/Cache/cyberdrop.db`) and your `URLs.txt` between container recreates. The first run after a fresh install adopts any real files the user already wrote into `~/AppData` / `~/URLs.txt` before the symlinks existed and moves them into `/state/cyberdrop/` once.
 
 ## Example
 

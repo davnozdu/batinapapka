@@ -12,7 +12,7 @@
 
 services:
   batinapapka_cyberdrop:
-    image: ghcr.io/davnozdu/batinapapka-cyberdrop:${IMAGE_TAG:-latest}
+    image: ghcr.io/davnozdu/batinapapka-cyberdrop:latest
     pull_policy: always
     container_name: batinapapka_cyberdrop
     restart: unless-stopped

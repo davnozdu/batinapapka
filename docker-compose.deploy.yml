@@ -10,7 +10,7 @@
 
 services:
   batinapapka:
-    image: ghcr.io/davnozdu/batinapapka:${IMAGE_TAG:-latest}
+    image: ghcr.io/davnozdu/batinapapka:latest
     pull_policy: always
     container_name: batinapapka
     restart: unless-stopped
