@@ -54,26 +54,89 @@ VIDEO_EXTENSIONS = frozenset({
     ".mp4", ".avi", ".mov", ".mkv", ".flv", ".wmv", ".webm", ".mpeg", ".mpg",
 })
 
-# Hostings considered authoritative for adult-video lookups. A hit on one of
-# these is weighted higher than a hit on a random aggregator.
-KNOWN_HOSTS = frozenset({
-    "pornhub.com", "xvideos.com", "xhamster.com", "youporn.com", "redtube.com",
-    "spankbang.com", "eporner.com", "porntrex.com", "manyvids.com",
-    "chaturbate.com", "onlyfans.com", "brazzers.com", "realitykings.com",
-    "bangbros.com", "adulttime.com", "vrbangers.com", "wankzvr.com",
-    "beeg.com", "tnaflix.com", "tube8.com", "drtuber.com",
-})
-
-VIDEO_HOSTINGS = (
-    "YouTube", "Vimeo", "Dailymotion", "Twitch", "Facebook", "Instagram", "Twitter",
-    "Pornhub", "Xvideos", "YouPorn", "RedTube", "Porn.com", "XHamster", "Brazzers",
-    "SpankBang", "TNAFlix", "Tube8", "JizzBunker", "KeezMovies", "Nuvid", "DrTuber",
-    "BangBros", "Mofos", "Reality Kings", "PornHD", "ManyVids", "PornTrex", "EPORNER",
-    "xHamsterLive", "Chaturbate", "CamSoda", "MyFreeCams", "LiveJasmin",
-    "VRBangers", "WankzVR", "AdultTime", "PornDoe", "Beeg", "SunPorno",
-    "Porn300", "PornOne", "MegaPorn", "EMPFlix", "Txxx", "HDZog", "AlphaPorno",
-    "OnlyFans", "Manyvids", "ModelHub", "XHamster Premium", "PornhubPremium",
+# Tube/aggregator/cam hostings — their names in a title are SEO boilerplate
+# ("Big Buck Bunny - Pornhub"), not part of the actual content, so we strip
+# them from both filenames-to-search and chosen titles.
+TUBE_AND_CAM_NAMES = (
+    # Mainstream — almost always noise when present in an adult-video search.
+    "YouTube", "Vimeo", "Dailymotion", "Twitch", "Facebook", "Instagram",
+    "Twitter", "TikTok",
+    # Major adult tubes.
+    "Pornhub", "PornhubPremium", "Pornhub Premium", "Xvideos", "XNXX",
+    "YouPorn", "RedTube", "Porn.com", "XHamster", "XHamster Premium",
+    "xHamsterLive", "SpankBang", "TNAFlix", "Tube8", "JizzBunker",
+    "KeezMovies", "Nuvid", "DrTuber", "EPORNER", "Beeg", "SunPorno",
+    "Porn300", "PornOne", "MegaPorn", "EMPFlix", "Txxx", "HDZog",
+    "AlphaPorno", "PornDoe", "PornTrex", "PornHD", "Spankwire", "HClips",
+    "HQporner", "Fapality", "AnyPorn", "AnySex", "HotMovs", "BravoTube",
+    "HellPorno", "HotShame", "Pichunter", "PornHat", "Vjav", "Vporn",
+    "4Tube", "Fux", "PornHub", "Fapcat", "TubeGalore", "PornDig",
+    "Yespornplease", "Shooshtime", "24porn", "IcePorn", "GotPorn",
+    "BoyFriendTV", "EmpFlix",
+    # JAV-focused tubes.
+    "JavHD", "JavBus", "JavLibrary", "JavGuru",
+    # Cam sites.
+    "Chaturbate", "CamSoda", "MyFreeCams", "LiveJasmin", "BongaCams",
+    "Stripchat", "Cam4", "Camster", "ImLive",
 )
+
+# Studio/brand names — these ARE meaningful parts of titles ("Brazzers", "Blacked",
+# "OnlyFans") and must NOT be stripped. We still want a host bonus for hits on
+# their domains, so they show up in KNOWN_HOSTS below.
+STUDIO_NAMES = (
+    "Brazzers", "BangBros", "Mofos", "Reality Kings", "RealityKings",
+    "Naughty America", "NaughtyAmerica", "Digital Playground",
+    "DigitalPlayground", "Evil Angel", "EvilAngel", "Jules Jordan",
+    "JulesJordan", "Hard X", "HardX", "Babes", "Twistys", "Blacked",
+    "Tushy", "Vixen", "Deeper", "Slayed", "Kink", "BangBus", "TeamSkeet",
+    "Mile High Media", "Wicked", "Burning Angel", "BurningAngel",
+    "Met-Art", "Met Art", "MetArt", "ATKgalleria", "Mr. Skin",
+    # VR studios.
+    "VRBangers", "WankzVR", "BadoinkVR", "Naughty America VR",
+    "NaughtyAmericaVR", "VRConk", "SLR", "SexLikeReal", "POVR",
+    "VirtualRealPorn", "VRPorn", "AdultTime", "Adult Time",
+    # Creator platforms — treated as brands because creators are usually
+    # identified as e.g. "Mia Khalifa OnlyFans".
+    "OnlyFans", "ManyVids", "Manyvids", "Fansly", "ModelHub", "Fancentro",
+    "LoyalFans", "JustForFans", "IsMyGirl", "iWantClips", "iWantEmpire",
+    "Clips4Sale", "Pocketstars",
+)
+
+# Backwards-compat alias for any external reference.
+VIDEO_HOSTINGS = TUBE_AND_CAM_NAMES + STUDIO_NAMES
+
+# Authoritative hosts (tubes + studios + creator platforms). A result hit on
+# any of these gets a +0.10 confidence bonus in choose_best.
+KNOWN_HOSTS = frozenset({
+    # Tubes.
+    "pornhub.com", "xvideos.com", "xnxx.com", "xhamster.com", "youporn.com",
+    "redtube.com", "spankbang.com", "eporner.com", "porntrex.com",
+    "tnaflix.com", "tube8.com", "drtuber.com", "beeg.com", "hclips.com",
+    "hqporner.com", "spankwire.com", "4tube.com", "hotmovs.com",
+    "bravotube.com", "anyporn.com", "anysex.com", "vjav.com", "vporn.com",
+    "hellporno.com", "hotshame.com", "pichunter.com", "pornhat.com",
+    "fapality.com", "txxx.com", "hdzog.com", "alphaporno.com",
+    "sunporno.com", "porn300.com", "pornone.com", "empflix.com",
+    "porndig.com", "yespornplease.com", "shooshtime.com", "gotporn.com",
+    "iceporn.com", "javhd.com", "javbus.com", "jav.guru",
+    # Cam.
+    "chaturbate.com", "camsoda.com", "myfreecams.com", "livejasmin.com",
+    "bongacams.com", "stripchat.com", "cam4.com",
+    # Creator / paywalled.
+    "onlyfans.com", "manyvids.com", "fansly.com", "fancentro.com",
+    "loyalfans.com", "justfor.fans", "ismygirl.com", "iwantclips.com",
+    "clips4sale.com",
+    # Studios.
+    "brazzers.com", "realitykings.com", "bangbros.com", "mofos.com",
+    "naughtyamerica.com", "digitalplayground.com", "evilangel.com",
+    "julesjordan.com", "hardx.com", "babes.com", "twistys.com",
+    "blacked.com", "tushy.com", "vixen.com", "deeper.com", "slayed.com",
+    "kink.com", "teamskeet.com", "adulttime.com", "wicked.com",
+    "burningangel.com", "met-art.com", "atkgalleria.com",
+    # VR.
+    "vrbangers.com", "wankzvr.com", "badoinkvr.com", "vrconk.com",
+    "sexlikereal.com", "povr.com", "virtualrealporn.com", "vrporn.com",
+})
 
 # Exact hostnames (or their subdomains) to drop from search results.
 EXCLUDED_HOSTS = frozenset({
@@ -104,7 +167,7 @@ _CLEAN_PATTERNS = [
 ]
 
 _HOSTINGS_RE = re.compile(
-    r"\b(" + "|".join(re.escape(h) for h in VIDEO_HOSTINGS) + r")\b",
+    r"\b(" + "|".join(re.escape(h) for h in TUBE_AND_CAM_NAMES) + r")\b",
     re.IGNORECASE,
 )
 _YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
