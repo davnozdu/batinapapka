@@ -16,6 +16,7 @@ import logging
 import os
 import re
 import shutil
+import subprocess
 import sys
 import time
 import unicodedata
@@ -35,9 +36,10 @@ LOG_FILE = "file_renamer.log"
 RENAMED_FILES_LOG = "renamed_files.txt"
 CACHE_FILE = "search_cache.json.gz"
 CACHE_TTL_DAYS = 30
-SIMILARITY_THRESHOLD = 0.40
+SIMILARITY_THRESHOLD = 0.50
 MIN_FREE_SPACE_BYTES = 100 * 1024 * 1024
 REQUEST_TIMEOUT = 10
+FFPROBE_TIMEOUT = 5
 BRAVE_SEARCH_API_URL = "https://api.search.brave.com/res/v1/web/search"
 BRAVE_RESULTS_PER_QUERY = 20  # Brave Search API caps `count` at 20.
 
@@ -46,6 +48,16 @@ NUMERIC_FILENAME_LEN = 18
 
 VIDEO_EXTENSIONS = frozenset({
     ".mp4", ".avi", ".mov", ".mkv", ".flv", ".wmv", ".webm", ".mpeg", ".mpg",
+})
+
+# Hostings considered authoritative for adult-video lookups. A hit on one of
+# these is weighted higher than a hit on a random aggregator.
+KNOWN_HOSTS = frozenset({
+    "pornhub.com", "xvideos.com", "xhamster.com", "youporn.com", "redtube.com",
+    "spankbang.com", "eporner.com", "porntrex.com", "manyvids.com",
+    "chaturbate.com", "onlyfans.com", "brazzers.com", "realitykings.com",
+    "bangbros.com", "adulttime.com", "vrbangers.com", "wankzvr.com",
+    "beeg.com", "tnaflix.com", "tube8.com", "drtuber.com",
 })
 
 VIDEO_HOSTINGS = (
@@ -93,6 +105,10 @@ _LONG_NUM_RE = re.compile(r"\b\d{6,}\b")
 _SINGLE_LETTER_RE = re.compile(r"\b[a-zA-Z]\b")
 _SEPARATOR_RE = re.compile(r"[_\-]+")
 _UNSAFE_FILENAME_RE = re.compile(r'[<>:"/\\|?*]')
+_ISO_DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
+# Two or more consecutive Capitalized tokens — a strong cue for a person/studio
+# name in a filename (e.g. "Mia.Khalifa.full.mp4" → "Mia", "Khalifa").
+_NAME_TOKEN_RE = re.compile(r"\b[A-Z][a-z]{2,}\b")
 
 logger = logging.getLogger(__name__)
 
@@ -164,33 +180,55 @@ class CompressedCache:
         self.timestamps[key] = datetime.now().isoformat()
 
 
-def _host_excluded(url: str) -> bool:
+def _normalized_host(url: str) -> str:
     host = (urlparse(url).hostname or "").lower()
     if host.startswith("www."):
         host = host[4:]
+    return host
+
+
+def _host_excluded(host: str) -> bool:
     for blocked in EXCLUDED_HOSTS:
         if host == blocked or host.endswith("." + blocked):
             return True
     return False
 
 
-def _normalize_results(items: Iterable[dict]) -> List[Dict[str, str]]:
-    out: List[Dict[str, str]] = []
-    for item in items:
-        url = item.get("url", "")
-        if _host_excluded(url):
+def _host_known(host: str) -> bool:
+    return any(host == h or host.endswith("." + h) for h in KNOWN_HOSTS)
+
+
+def _parse_page_age(raw: str) -> Optional[str]:
+    """Return YYYY-MM-DD if `raw` looks like one, else None.
+
+    Brave occasionally returns ISO 8601 with a T suffix, sometimes a relative
+    string ("3 days ago"), sometimes year-only. We only trust an explicit
+    YYYY-MM-DD substring; anything else falls back to mtime in the caller.
+    """
+    if not raw:
+        return None
+    m = _ISO_DATE_RE.search(raw)
+    return m.group() if m else None
+
+
+def _normalize_results(items: Iterable[dict]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for rank, item in enumerate(items):
+        url = item.get("url", "") or ""
+        host = _normalized_host(url)
+        if _host_excluded(host):
             continue
         out.append({
             "title": item.get("title", "") or "",
             "page_age": item.get("page_age") or "",
             "url": url,
+            "host": host,
+            "rank": rank,
         })
     return out
 
 
 class BraveSearchClient:
-    QUERY_TEMPLATE = '"{q}" adult video'
-
     def __init__(self, api_key: str, cache: CompressedCache):
         self.cache = cache
         self.session = requests.Session()
@@ -210,12 +248,15 @@ class BraveSearchClient:
     def _key(self, full_query: str) -> str:
         return hashlib.sha1(f"brave:{full_query}".encode("utf-8")).hexdigest()
 
-    def search(self, query: str) -> List[Dict[str, str]]:
-        full_query = self.QUERY_TEMPLATE.format(q=query)
+    def search(self, full_query: str) -> List[Dict[str, Any]]:
+        """Run one Brave search. `full_query` must already be the literal text
+        sent as `q=` (templating happens in the caller)."""
+        if not full_query.strip():
+            return []
         key = self._key(full_query)
         cached = self.cache.get(key)
         if cached is not None:
-            logger.info("Brave cache hit: %s", query)
+            logger.info("Brave cache hit: %s", full_query)
             return cached
 
         for attempt in range(1, self.retry_count + 1):
@@ -252,6 +293,28 @@ class BraveSearchClient:
         return []
 
 
+def ffprobe_title(path: str) -> Optional[str]:
+    """Return the embedded `title` tag from the media container, or None."""
+    try:
+        out = subprocess.run(
+            ["ffprobe", "-v", "error",
+             "-show_entries", "format_tags=title",
+             "-of", "json", path],
+            capture_output=True, text=True, timeout=FFPROBE_TIMEOUT,
+        )
+    except (OSError, subprocess.TimeoutExpired) as e:
+        logger.debug("ffprobe failed on %s: %s", path, e)
+        return None
+    if out.returncode != 0:
+        return None
+    try:
+        tags = json.loads(out.stdout or "{}").get("format", {}).get("tags", {}) or {}
+    except json.JSONDecodeError:
+        return None
+    title = (tags.get("title") or tags.get("TITLE") or "").strip()
+    return title or None
+
+
 class TitleProcessor:
     @lru_cache(maxsize=4096)
     def clean_title(self, title: str, is_original_file: bool = False) -> str:
@@ -286,26 +349,73 @@ class TitleProcessor:
         cb = self.clean_title(b)
         if not ca or not cb:
             return 0.0
-        # token_set_ratio handles word reordering, duplicates and partial overlap
-        # well enough that the previous TF-IDF + multi-metric blend isn't needed.
-        return fuzz.token_set_ratio(ca, cb) / 100.0
+        # Blend three rapidfuzz metrics — each catches different mismatches.
+        # token_set_ratio: extra/reordered tokens; partial_ratio: substring
+        # contained in a longer title; WRatio: rapidfuzz's own blended score.
+        return max(
+            fuzz.token_set_ratio(ca, cb),
+            fuzz.partial_ratio(ca, cb),
+            fuzz.WRatio(ca, cb) * 0.9,
+        ) / 100.0
 
     def choose_best(
-        self, original: str, results: List[Dict[str, str]]
-    ) -> Tuple[Optional[str], Optional[str]]:
+        self,
+        original: str,
+        results: List[Dict[str, Any]],
+        year_hint: Optional[str] = None,
+        required_tokens: Optional[Set[str]] = None,
+    ) -> Tuple[Optional[str], Optional[str], float]:
+        """Pick the most likely title/date from a result list.
+
+        Returns (date, title, score). When no result clears SIMILARITY_THRESHOLD,
+        returns (None, None, best_observed_score) — the score is exposed so the
+        caller can decide whether to try a wider query.
+        """
         best_score, best_title, best_date = 0.0, None, None
+        required_lc = {t.lower() for t in (required_tokens or set())}
+
         for r in results:
             title = r.get("title", "")
+            if not title:
+                continue
+            title_lc = title.lower()
+            # Required tokens (e.g. names extracted from the filename) must
+            # appear in the candidate title — otherwise it's a different video.
+            if required_lc and not all(t in title_lc for t in required_lc):
+                continue
+
             score = self._similarity(original, title)
+
+            # Length sanity — very short or very long titles are usually junk.
             if len(title) < 10 or len(title) > 100:
                 score *= 0.8
+
+            # Bonus for top-of-page rank: +0..+0.10 over the top 10 hits.
+            rank = r.get("rank", 0)
+            score += max(0.0, (10 - rank)) * 0.01
+
+            # Bonus for an authoritative adult-video host.
+            if _host_known(r.get("host", "")):
+                score += 0.10
+
+            # Year sanity: if the filename embeds a year and the page age has
+            # one too, reward agreement and lightly penalize a big mismatch.
+            page_date = _parse_page_age(r.get("page_age", ""))
+            if year_hint and page_date:
+                page_year = page_date[:4]
+                if page_year == year_hint:
+                    score += 0.05
+                elif abs(int(page_year) - int(year_hint)) > 2:
+                    score -= 0.10
+
             if score > best_score:
                 best_score = score
                 best_title = self.clean_title(title)
-                best_date = (r.get("page_age") or "")[:10] or None
+                best_date = page_date
+
         if best_score < SIMILARITY_THRESHOLD:
-            return None, None
-        return best_date, best_title
+            return None, None, best_score
+        return best_date, best_title, best_score
 
 
 @dataclass
@@ -315,8 +425,41 @@ class Stats:
     skipped: int = 0
     errors: int = 0
     brave_queries_hit: int = 0
+    brave_queries_sent: int = 0
     no_search_results: int = 0
     using_original_name: int = 0
+    used_embedded_title: int = 0
+
+
+# Query variants are tried in order; we stop as soon as choose_best returns a
+# title that clears the threshold. Each variant produces a different `q=` text
+# (and therefore a different cache key), so caching stays consistent.
+_QUERY_VARIANTS = (
+    '"{q}" adult video',  # strict phrase + genre bias
+    "{q} adult video",    # loose, still genre-biased
+    '"{q}"',              # strict phrase, generic
+    "{q}",                # loose, generic
+)
+
+
+def _extract_year(text: str) -> Optional[str]:
+    m = _YEAR_RE.search(text)
+    return m.group() if m else None
+
+
+def _required_tokens(name: str) -> Set[str]:
+    """Heuristic: if a filename has two or more Capitalized tokens of length>=3,
+    treat them as a strong signal (person/studio name) and require the chosen
+    title to contain all of them. Returns an empty set otherwise."""
+    tokens = _NAME_TOKEN_RE.findall(name.replace("_", " ").replace(".", " "))
+    deduped = []
+    seen = set()
+    for t in tokens:
+        if t.lower() in seen:
+            continue
+        seen.add(t.lower())
+        deduped.append(t)
+    return set(deduped) if len(deduped) >= 2 else set()
 
 
 class VideoFileRenamer:
@@ -377,11 +520,7 @@ class VideoFileRenamer:
             return False
         return True
 
-    def _search(self, query: str) -> List[Dict[str, str]]:
-        results = self.brave_client.search(query)
-        if results:
-            self.stats.brave_queries_hit += 1
-            logger.info("Brave returned %d results", len(results))
+    def _dedup(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         seen, unique = set(), []
         for r in results:
             key = (r.get("url", ""), r.get("title", "").lower())
@@ -389,7 +528,67 @@ class VideoFileRenamer:
                 continue
             seen.add(key)
             unique.append(r)
+        # Preserve original rank for the bonus in choose_best.
+        for idx, r in enumerate(unique):
+            r["rank"] = idx
         return unique
+
+    def _candidate_queries(self, original_base: str, embedded: Optional[str]) -> List[str]:
+        """Produce a deduplicated list of `q=` strings to try in order.
+
+        - Start with the embedded title (most authoritative), if present.
+        - Then the cleaned filename (the high-recall form).
+        - Then the raw filename, which keeps any tokens our cleaner stripped.
+        Each base is run through _QUERY_VARIANTS (strict→loose, genre→generic).
+        """
+        bases: List[str] = []
+        if embedded:
+            bases.append(embedded.strip())
+        cleaned = self.title.clean_title(original_base, is_original_file=True)
+        if cleaned and cleaned != "unnamed_video":
+            bases.append(cleaned)
+        # Raw base may still help when our cleaner is over-aggressive.
+        if original_base.strip() and original_base.strip() not in bases:
+            bases.append(original_base.strip())
+
+        queries: List[str] = []
+        for base in bases:
+            for tmpl in _QUERY_VARIANTS:
+                q = tmpl.format(q=base)
+                if q not in queries:
+                    queries.append(q)
+        return queries
+
+    def _cascade_search(
+        self,
+        original_base: str,
+        embedded: Optional[str],
+    ) -> Tuple[Optional[str], Optional[str], List[Dict[str, Any]]]:
+        """Try queries in order. Return the first (date, title) that clears the
+        threshold, plus the merged result list for diagnostics."""
+        year_hint = _extract_year(original_base)
+        required = _required_tokens(original_base)
+        # The "original" against which similarity is measured stays the same
+        # across all variants — we're trying different queries, not different
+        # references for similarity.
+        merged: List[Dict[str, Any]] = []
+        for q in self._candidate_queries(original_base, embedded):
+            self.stats.brave_queries_sent += 1
+            results = self.brave_client.search(q)
+            if not results:
+                continue
+            merged.extend(results)
+            merged = self._dedup(merged)
+            date, title, score = self.title.choose_best(
+                original_base, merged,
+                year_hint=year_hint,
+                required_tokens=required,
+            )
+            logger.info("Query %r: %d results, best score %.2f", q, len(results), score)
+            if title:
+                self.stats.brave_queries_hit += 1
+                return date, title, merged
+        return None, None, merged
 
     def _backup_mapping(self, directory: str, old: str, new: str) -> None:
         backup = Path(directory) / ".filename_mapping.json"
@@ -438,20 +637,30 @@ class VideoFileRenamer:
                 file_date = datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d")
 
                 logger.info("Processing %s", filename)
-                results = self._search(base)
+                embedded = ffprobe_title(path)
+                if embedded:
+                    logger.info('Embedded title: "%s"', embedded)
+                    self.stats.used_embedded_title += 1
 
-                if results:
-                    date, new_title = self.title.choose_best(base, results)
-                    if not new_title:
+                date, new_title, merged = self._cascade_search(base, embedded)
+
+                if not new_title:
+                    # Last-resort fallback: use the embedded title if it
+                    # exists, otherwise the cleaned filename. mtime stands in
+                    # for the unknown publication date.
+                    if embedded and len(embedded) >= 3:
+                        new_title = self.title.clean_title(embedded)
+                        if not new_title:
+                            new_title = self.title.clean_title(base, is_original_file=True)
+                    else:
                         new_title = self.title.clean_title(base, is_original_file=True)
-                        date = file_date
-                        self.stats.using_original_name += 1
-                    elif not date:
-                        date = file_date
-                else:
-                    new_title = self.title.clean_title(base, is_original_file=True)
                     date = file_date
-                    self.stats.no_search_results += 1
+                    if merged:
+                        self.stats.using_original_name += 1
+                    else:
+                        self.stats.no_search_results += 1
+                elif not date:
+                    date = file_date
 
                 new_filename = self._unique(
                     directory, self._safe(f"{date} {new_title}{ext}")
