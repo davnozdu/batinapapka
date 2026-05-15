@@ -52,6 +52,74 @@ docker compose logs -f batinapapka
 
 The container does one immediate run on startup, then runs again on `CRON_SCHEDULE` (default: `0 3 * * *` — every day at 03:00). Cache, log and the renamed-files index live in the named volume `batinapapka_state`, so they survive recreates.
 
+## Deploy the prebuilt image from GHCR
+
+Every push to `main` and every `vX.Y.Z` tag triggers a GitHub Actions workflow that builds a multi-arch image (linux/amd64, linux/arm64) and publishes it to **`ghcr.io/davnozdu/batinapapka`**. No need to clone the repo or build locally on the target host — Docker is the only dependency.
+
+Available tags:
+
+| Tag | When you'd use it |
+| --- | --- |
+| `latest` | Tracks the tip of `main`. Convenient, but moves under you. |
+| `1.2.3`, `1.2`, `1` | Published for every `vX.Y.Z` git tag. Pin one for production. |
+| `main` | Same content as `latest`, but explicit branch ref. |
+| `sha-<short>` | Immutable pointer to a specific commit. Bulletproof rollback. |
+
+### One-time setup
+
+```bash
+# 1. Grab the deploy compose and env template (no git clone needed)
+mkdir -p ~/batinapapka && cd ~/batinapapka
+curl -fsSL https://raw.githubusercontent.com/davnozdu/batinapapka/main/docker-compose.deploy.yml -o docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/davnozdu/batinapapka/main/.env.example       -o .env
+
+# 2. Fill the env file — at minimum BRAVE_API_KEY and VIDEO_DIR
+$EDITOR .env
+
+# 3. Pull + run
+docker compose pull
+docker compose up -d
+docker compose logs -f batinapapka
+```
+
+If the GHCR package is still private you'll see `unauthorized` on `pull`. Either flip the package to public once (GitHub → repo → Packages → batinapapka → Package settings → Change visibility → Public), or `docker login ghcr.io -u <github_user>` using a PAT with `read:packages`.
+
+### `.env` reference
+
+```env
+# Required
+BRAVE_API_KEY=...                       # https://brave.com/search/api/
+VIDEO_DIR=/srv/media/videos             # host path mounted into /videos
+
+# Optional
+CRON_SCHEDULE=0 3 * * *                 # cron line for the recurring run
+IMAGE_TAG=latest                        # pin to e.g. 1.2.3 for production
+```
+
+### Updating
+
+```bash
+# pull latest image and recreate the container
+docker compose pull && docker compose up -d
+```
+
+If you pinned `IMAGE_TAG=1.2.3` in `.env`, bump it and rerun — `pull` will only fetch the new tag.
+
+### Run once, ad-hoc
+
+For a one-shot run without cron or compose:
+
+```bash
+docker run --rm \
+  -e BRAVE_API_KEY=... \
+  -v /path/to/videos:/videos \
+  -v "$PWD/state":/state \
+  -w /state \
+  ghcr.io/davnozdu/batinapapka:latest /videos
+```
+
+The image's `ENTRYPOINT` is the renamer itself; the trailing `/videos` is the directory argument.
+
 ## Run combined with cyberdrop-dl
 
 `batinapapka_cyberdrop-dl.yaml` adds `cyberdrop-dl-patched` and an SSH side-car for interactive use. Same `.env` plus two extra variables:

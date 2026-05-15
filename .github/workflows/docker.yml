@@ -11,6 +11,10 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  # Force the JavaScript-based actions onto Node.js 24 ahead of GitHub's
+  # forced migration on 2026-06-02. Removes the deprecation warning emitted
+  # by actions/checkout, docker/* and friends.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
   build:
