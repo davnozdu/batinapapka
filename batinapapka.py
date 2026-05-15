@@ -528,9 +528,6 @@ class ProgressReporter:
     def start(self, total: int) -> None:
         self.total = total
         self.current = 0
-        if self.enabled:
-            sys.stderr.write(f"Found {total} candidate file(s)\n")
-            sys.stderr.flush()
 
     def tick(self) -> None:
         self.current += 1
@@ -542,6 +539,7 @@ class ProgressReporter:
             return 80
 
     def status(self, msg: str) -> None:
+        """Update the single rotating status line in place (TTY only)."""
         if not self.enabled:
             return
         line = f"[{self.current}/{self.total}] {msg}"
@@ -553,9 +551,19 @@ class ProgressReporter:
         self._last_status = line
 
     def announce(self, msg: str, error: bool = False) -> None:
+        """Surface a per-file event.
+
+        TTY mode: only errors break out of the rotating line as a permanent
+        message above it. Successful renames and skips are silent — the
+        counter in the status line is the only "I'm making progress" signal.
+        Off-TTY (cron, docker logs): everything is printed line by line so
+        the run is still inspectable from logs.
+        """
         prefix = f"[{self.current}/{self.total}] " if self.total else ""
         line = prefix + msg
         if self.enabled:
+            if not error:
+                return
             sys.stderr.write(self._ANSI_CLEAR_LINE + line + "\n")
             sys.stderr.flush()
             if self._last_status:
@@ -777,6 +785,7 @@ class VideoFileRenamer:
 
         for filename in candidates:
             self.progress.tick()
+            self.progress.status(filename)
             try:
                 if not self._should_process(filename, force):
                     self.progress.announce(f"skip {filename}")
@@ -986,9 +995,6 @@ def main() -> int:
     try:
         for target in targets:
             logger.info("Target directory: %s", target)
-            if show_progress:
-                sys.stderr.write(f"\n=== {target} ===\n")
-                sys.stderr.flush()
             try:
                 renamer.process(target, force=args.force)
             except (ValueError, OSError) as e:

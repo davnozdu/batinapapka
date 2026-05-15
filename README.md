@@ -153,18 +153,22 @@ batinapapka -q --recursive /videos     # silence the progress bar, only print fi
 batinapapka --clean-cache --recursive /videos  # drop cache first
 ```
 
-When you run interactively (stderr is a TTY) the terminal shows:
+When you run interactively (stderr is a TTY) the terminal shows a **single rotating line** updated in place:
 
 ```
-=== /videos/movies ===
-Found 42 candidate file(s)
-[ 1/42] renamed Big.Buck.Bunny.1080p.mp4 -> 2024-08-12 Big Buck Bunny.mp4
-[ 2/42] renamed sintel_trailer_2010.mkv  -> 2026-05-15 Sintel.mkv
-[ 3/42] ERROR locked: in_progress_download.mp4
-[ 4/42] searching: Mia.Khalifa.example.mp4_       ← live rotating line
+[ 47/420] searching: Big.Buck.Bunny.1080p.mp4_
 ```
 
-Each completed file (success, skip, or error) prints a permanent line above; the bottom line is the rotating status of the file currently being looked up against Brave. Errors are also written to stderr so they survive a piped log too. The full INFO/DEBUG trace is in `/state/file_renamer.log` regardless of which mode you picked.
+The number on the left ticks up as files are processed; the filename changes as the renamer moves through the list. Only errors break out of the line and print permanently above (so a piped log is still useful):
+
+```
+[ 53/420] ERROR locked: in_progress_download.mp4
+[ 54/420] searching: Mia.Khalifa.example.mp4_     ← rotating line resumes below
+```
+
+Every per-file detail (matched title, score, cache hits, …) still lands in `/state/file_renamer.log`; the rotating line is just a "I'm alive" indicator.
+
+In **`-v / --verbose`** the rotating line is replaced with the full INFO stream — every `Processing …`, `Brave returned N results`, `Renamed X -> Y` event printed on its own line. **Off-TTY** runs (cron, `docker logs`) always behave like `--verbose`: full line-by-line output, no carriage returns.
 
 If you really want to bypass the container entirely:
 
