@@ -3,8 +3,13 @@
 
 services:
   batinapapka:
+    # Tagging the locally-built image as ghcr.io/davnozdu/batinapapka means
+    # the same compose works for either flow:
+    #   docker compose build      → builds from this checkout, retags GHCR
+    #   docker compose pull       → pulls the published image instead
+    #   docker compose up         → tries pull first; if absent, builds
     build: .
-    image: batinapapka:latest
+    image: ghcr.io/davnozdu/batinapapka:${IMAGE_TAG:-latest}
     container_name: batinapapka
     restart: unless-stopped
 
