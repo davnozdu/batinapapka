@@ -35,6 +35,7 @@ from unidecode import unidecode
 LOG_FILE = "file_renamer.log"
 RENAMED_FILES_LOG = "renamed_files.txt"
 CACHE_FILE = "search_cache.json.gz"
+LOCK_FILE = ".batinapapka.lock"
 CACHE_TTL_DAYS = 30
 SIMILARITY_THRESHOLD = 0.60
 # Stricter threshold for filenames with no strong signal (no Capitalized
@@ -835,6 +836,14 @@ class VideoFileRenamer:
                 base = os.path.splitext(filename)[0]
                 ext = os.path.splitext(filename)[1]
 
+                # File may have been removed/renamed between os.listdir() and
+                # now — most likely by a concurrent in-flight download or a
+                # parallel renamer run. Skip rather than crash.
+                if not os.path.exists(path):
+                    logger.info("File disappeared before processing: %s", filename)
+                    self.progress.skipped(filename)
+                    continue
+
                 try:
                     with open(path, "rb"):
                         pass
@@ -842,6 +851,10 @@ class VideoFileRenamer:
                     self.progress.error(f"locked: {filename}")
                     logger.error("File locked: %s", filename)
                     self.stats.errors += 1
+                    continue
+                except FileNotFoundError:
+                    logger.info("File disappeared while opening: %s", filename)
+                    self.progress.skipped(filename)
                     continue
 
                 file_date = datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d")
@@ -873,8 +886,19 @@ class VideoFileRenamer:
                     directory, self._safe(f"{date} {new_title}{ext}")
                 )
                 new_path = os.path.join(directory, new_filename)
+                if not os.path.exists(path):
+                    # Another mover (parallel renamer or downloader) got
+                    # there first.
+                    logger.info("Source vanished before move: %s", filename)
+                    self.progress.skipped(filename)
+                    continue
                 self._backup_mapping(directory, filename, new_filename)
-                shutil.move(path, new_path)
+                try:
+                    shutil.move(path, new_path)
+                except FileNotFoundError:
+                    logger.info("Source vanished during move: %s", filename)
+                    self.progress.skipped(filename)
+                    continue
                 self._mark_renamed(new_filename)
                 logger.info('Renamed "%s" -> "%s"', filename, new_filename)
                 self.progress.renamed(filename, new_filename)
@@ -959,6 +983,30 @@ def _expand_targets(roots: List[str], recursive: bool) -> List[str]:
     return targets
 
 
+def acquire_single_instance_lock(path: str):
+    """Take an exclusive non-blocking lock on `path` (fcntl.flock).
+
+    Returns the open file handle so the caller keeps it alive — fcntl locks
+    are released as soon as the fd is closed or the process exits.
+    Returns None if another process already holds the lock.
+    Returns False if the lock file can't be opened at all; the caller is
+    expected to proceed unlocked in that case (degraded mode).
+    """
+    try:
+        fd = open(path, "w")
+    except OSError as e:
+        logger.warning("Cannot open lock file %s: %s (running without lock)", path, e)
+        return False
+    try:
+        fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        fd.close()
+        return None
+    fd.write(str(os.getpid()))
+    fd.flush()
+    return fd
+
+
 def configure_logging(debug: bool, verbose: bool, show_progress: bool) -> None:
     """Wire up the logger.
 
@@ -1016,6 +1064,17 @@ def main() -> int:
     if not targets:
         logger.error("No usable directories among: %s", args.directories)
         return 2
+
+    # Refuse to run concurrently with another batinapapka instance — that
+    # races over the same directories and produces "file vanished" errors.
+    lock = acquire_single_instance_lock(LOCK_FILE)
+    if lock is None:
+        msg = ("Another batinapapka run is already in progress "
+               f"(lock file {os.path.abspath(LOCK_FILE)} is held). "
+               "Wait for it to finish, then retry.")
+        logger.error(msg)
+        print(msg, file=sys.stderr)
+        return 75  # EX_TEMPFAIL
 
     if args.clean_cache:
         try:
