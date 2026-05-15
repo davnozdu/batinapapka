@@ -123,6 +123,14 @@ if [ -n "${CRON_SCHEDULE:-}" ]; then
     chmod 0644 /etc/cron.d/batinapapka
     touch "${STATE_DIR}/cron.log"
 
+    # Expose BRAVE_API_KEY to interactive SSH sessions via PAM
+    # (`pam_env` reads /etc/environment by default on Debian).
+    if ! grep -q '^BRAVE_API_KEY=' /etc/environment 2>/dev/null; then
+        echo "BRAVE_API_KEY=${BRAVE_API_KEY}" >> /etc/environment
+    else
+        sed -i "s|^BRAVE_API_KEY=.*|BRAVE_API_KEY=${BRAVE_API_KEY}|" /etc/environment
+    fi
+
     echo "[entrypoint] one-shot run (cron schedule: ${CRON_SCHEDULE})"
     sh -c "$RENAMER" || true
 

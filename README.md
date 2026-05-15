@@ -130,6 +130,38 @@ The compose files pin `image:` to `:latest`. If you want to lock onto a specific
 docker compose pull && docker compose up -d
 ```
 
+### Run the renamer by hand (outside the cron schedule)
+
+The cron job is convenient but sometimes you want a run right now — e.g. after a fresh batch of `cyberdrop-dl` downloads. The image installs a short wrapper, `/usr/local/bin/batinapapka`, that calls the script with whatever args you pass:
+
+**From the host (uses the running container's env automatically):**
+
+```bash
+docker compose exec batinapapka            batinapapka --recursive /videos
+# or, on the cyberdrop stack:
+docker compose -f batinapapka_cyberdrop-dl.yaml exec batinapapka_cyberdrop  batinapapka --recursive /videos
+```
+
+**Inside an SSH session (cyberdrop image only).** `BRAVE_API_KEY` is exported to `/etc/environment` by the entrypoint, so it's in your shell env after login:
+
+```bash
+ssh -p 2222 "$SHELL_USER"@host
+batinapapka --recursive /videos        # full default run
+batinapapka --debug /videos/movies     # one folder, verbose
+batinapapka --clean-cache --recursive /videos  # drop cache first
+```
+
+If you really want to bypass the container entirely:
+
+```bash
+docker run --rm \
+  -e BRAVE_API_KEY=... \
+  -e CRON_SCHEDULE= \
+  -v /path/to/videos:/videos \
+  -v "$PWD/state":/state \
+  ghcr.io/davnozdu/batinapapka:latest --recursive /videos
+```
+
 ### Run once, ad-hoc (no compose)
 
 ```bash

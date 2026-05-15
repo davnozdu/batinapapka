@@ -20,7 +20,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY batinapapka.py ./
 COPY entrypoint.sh /usr/local/bin/batinapapka-entrypoint
-RUN chmod +x /usr/local/bin/batinapapka-entrypoint
+RUN chmod +x /usr/local/bin/batinapapka-entrypoint \
+ && printf '#!/bin/sh\nexec /usr/local/bin/python /app/batinapapka.py "$@"\n' > /usr/local/bin/batinapapka \
+ && chmod +x /usr/local/bin/batinapapka
 
 VOLUME ["/state", "/videos"]
 WORKDIR /state
