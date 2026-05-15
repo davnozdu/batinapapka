@@ -32,7 +32,14 @@ RUN python3 -m venv /opt/cyberdrop/venv \
 COPY batinapapka.py ./
 COPY entrypoint-cyberdrop.sh /usr/local/bin/batinapapka-cyberdrop-entrypoint
 RUN chmod +x /usr/local/bin/batinapapka-cyberdrop-entrypoint \
- && printf '#!/bin/sh\nexec /usr/local/bin/python /app/batinapapka.py "$@"\n' > /usr/local/bin/batinapapka \
+ && printf '%s\n' \
+        '#!/bin/sh' \
+        '# cd into /state so file_renamer.log and search_cache.json.gz' \
+        '# always land on the persistent volume, no matter where the' \
+        '# caller was when they ran this.' \
+        'cd /state' \
+        'exec /usr/local/bin/python /app/batinapapka.py "$@"' \
+    > /usr/local/bin/batinapapka \
  && chmod +x /usr/local/bin/batinapapka
 
 VOLUME ["/state", "/videos"]

@@ -21,7 +21,14 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY batinapapka.py ./
 COPY entrypoint.sh /usr/local/bin/batinapapka-entrypoint
 RUN chmod +x /usr/local/bin/batinapapka-entrypoint \
- && printf '#!/bin/sh\nexec /usr/local/bin/python /app/batinapapka.py "$@"\n' > /usr/local/bin/batinapapka \
+ && printf '%s\n' \
+        '#!/bin/sh' \
+        '# cd into /state so file_renamer.log and search_cache.json.gz' \
+        '# always land on the persistent volume, no matter where the' \
+        '# caller was when they ran this.' \
+        'cd /state' \
+        'exec /usr/local/bin/python /app/batinapapka.py "$@"' \
+    > /usr/local/bin/batinapapka \
  && chmod +x /usr/local/bin/batinapapka
 
 VOLUME ["/state", "/videos"]
