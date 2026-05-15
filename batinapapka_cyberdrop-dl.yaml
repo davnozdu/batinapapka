@@ -19,9 +19,11 @@ services:
       BATINAPAPKA_REF: ${BATINAPAPKA_REF:-main}
 
     volumes:
-      # By default mounts ./videos next to this compose file. Override with
-      # VIDEO_DIR=/some/host/path in .env to point at another location.
-      - ${VIDEO_DIR:-./videos}:/videos
+      # Mount any number of host folders. Default command is recursive,
+      # so subdirectories under /videos are processed automatically.
+      - ./videos:/videos
+      # - /mnt/media/movies:/videos/movies
+      # - /mnt/nas/clips:/videos/clips
       - batinapapka_state:/state
 
     ports:
@@ -75,7 +77,7 @@ services:
         . /etc/environment
         export BRAVE_API_KEY
         cd /state
-        exec /usr/local/bin/python /usr/src/app/batinapapka.py /videos
+        exec /usr/local/bin/python /usr/src/app/batinapapka.py --recursive /videos
         WRAP
         chmod +x /usr/local/bin/run-batinapapka
 

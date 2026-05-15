@@ -6,7 +6,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends cron tini \
+ && apt-get install -y --no-install-recommends \
+        cron \
+        tini \
+        ffmpeg \
+        ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -15,5 +19,11 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY batinapapka.py ./
+COPY entrypoint.sh /usr/local/bin/batinapapka-entrypoint
+RUN chmod +x /usr/local/bin/batinapapka-entrypoint
 
-ENTRYPOINT ["/usr/bin/tini", "--", "python", "/app/batinapapka.py"]
+VOLUME ["/state", "/videos"]
+WORKDIR /state
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/batinapapka-entrypoint"]
+CMD ["--recursive", "/videos"]

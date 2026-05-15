@@ -765,7 +765,15 @@ def parse_args() -> argparse.Namespace:
         description="Rename adult video files based on Brave Search results.",
         formatter_class=argparse.RawTextHelpFormatter,
     )
-    parser.add_argument("directory", help="Path to the directory with video files")
+    parser.add_argument(
+        "directories", nargs="+",
+        help="One or more directories with video files. Pass --recursive to "
+             "descend into subdirectories.",
+    )
+    parser.add_argument(
+        "-r", "--recursive", action="store_true",
+        help="Descend into every subdirectory of each given path.",
+    )
     parser.add_argument(
         "--api-key", default=os.getenv("BRAVE_API_KEY"),
         help="Brave Search API key (or BRAVE_API_KEY env var)",
@@ -776,6 +784,40 @@ def parse_args() -> argparse.Namespace:
                         help="Re-process files already listed in renamed_files.txt")
     parser.add_argument("--debug", action="store_true", help="Verbose logging")
     return parser.parse_args()
+
+
+def _expand_targets(roots: List[str], recursive: bool) -> List[str]:
+    """Resolve each input path into a list of directories to process.
+
+    Non-existent or unreadable paths are dropped with a logged warning so the
+    rest of the run still completes. With --recursive every (sub)directory
+    that contains at least one file becomes a target; without it we only
+    process the paths given on the command line.
+    """
+    targets: List[str] = []
+    seen: Set[str] = set()
+    for root in roots:
+        if not os.path.isdir(root):
+            logger.warning("Skipping %s — not a directory", root)
+            continue
+        if not os.access(root, os.W_OK):
+            logger.warning("Skipping %s — no write access", root)
+            continue
+        if recursive:
+            for current, _, files in os.walk(root):
+                if not files:
+                    continue
+                real = os.path.realpath(current)
+                if real in seen:
+                    continue
+                seen.add(real)
+                targets.append(current)
+        else:
+            real = os.path.realpath(root)
+            if real not in seen:
+                seen.add(real)
+                targets.append(root)
+    return targets
 
 
 def configure_logging(debug: bool) -> None:
@@ -794,15 +836,10 @@ def main() -> int:
     if not args.api_key:
         logger.error("Brave API key missing (use --api-key or BRAVE_API_KEY env var)")
         return 2
-    if not os.path.isdir(args.directory):
-        logger.error("Not a directory: %s", args.directory)
-        return 2
-    if not os.access(args.directory, os.W_OK):
-        logger.error("No write access to %s", args.directory)
-        return 2
-    if shutil.disk_usage(args.directory).free < MIN_FREE_SPACE_BYTES:
-        logger.error("Less than %dMB free on %s",
-                     MIN_FREE_SPACE_BYTES // (1024 * 1024), args.directory)
+
+    targets = _expand_targets(args.directories, args.recursive)
+    if not targets:
+        logger.error("No usable directories among: %s", args.directories)
         return 2
 
     if args.clean_cache:
@@ -816,7 +853,12 @@ def main() -> int:
     brave = BraveSearchClient(args.api_key, cache)
     renamer = VideoFileRenamer(brave, cache)
     try:
-        renamer.process(args.directory, force=args.force)
+        for target in targets:
+            logger.info("Target directory: %s", target)
+            try:
+                renamer.process(target, force=args.force)
+            except (ValueError, OSError) as e:
+                logger.error("Skipping %s: %s", target, e)
     except KeyboardInterrupt:
         logger.info("Interrupted by user")
         cache.save()

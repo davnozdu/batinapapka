@@ -1,53 +1,41 @@
-# Production deployment: pulls the prebuilt image from GHCR instead of
-# building it locally. Use this on servers/NAS boxes where Docker is the
-# only thing you need to install. All secrets stay in environment
-# variables — see .env.example for the full list.
+# Production deployment: pulls the prebuilt image from GHCR.
 #
 # Quick start:
 #   curl -fsSL https://raw.githubusercontent.com/davnozdu/batinapapka/main/docker-compose.deploy.yml -o docker-compose.yml
 #   curl -fsSL https://raw.githubusercontent.com/davnozdu/batinapapka/main/.env.example       -o .env
-#   $EDITOR .env                  # fill BRAVE_API_KEY, VIDEO_DIR
+#   $EDITOR .env                  # fill BRAVE_API_KEY
+#   $EDITOR docker-compose.yml    # mount your video folder(s) — see below
 #   docker compose pull
 #   docker compose up -d
-#   docker compose logs -f batinapapka
 
 services:
   batinapapka:
-    image: ghcr.io/davnozdu/batinapapka:${IMAGE_TAG:-latest}
+    image: ghcr.io/davnozdu/batinapapka:latest
     pull_policy: always
     container_name: batinapapka
     restart: unless-stopped
 
     environment:
       BRAVE_API_KEY: ${BRAVE_API_KEY:?set BRAVE_API_KEY in .env or shell}
-      CRON_SCHEDULE: ${CRON_SCHEDULE:-0 3 * * *}
+      # Empty CRON_SCHEDULE makes the container run once and exit. Default
+      # is daily at 03:00. Override via .env if you want a different cadence.
+      CRON_SCHEDULE: "0 3 * * *"
 
     volumes:
-      # By default mounts ./videos next to this compose file. Override with
-      # VIDEO_DIR=/some/host/path in .env to point at another location.
-      - ${VIDEO_DIR:-./videos}:/videos
+      # Mount any number of host folders here. The image's default command
+      # is `--recursive /videos`, so anything under /videos (including
+      # subdirectories) gets processed.
+      #
+      # Single-folder layout:
+      - ./videos:/videos
+      #
+      # Multi-folder layout — uncomment and edit:
+      # - /mnt/media/movies:/videos/movies
+      # - /mnt/nas/clips:/videos/clips
+      # - /home/me/downloads:/videos/downloads
+
+      # Persistent state: cache, log, renamed-files index. Survives recreate.
       - batinapapka_state:/state
-
-    working_dir: /state
-
-    # The shipped image's ENTRYPOINT is the renamer itself. Override it so
-    # we install a crontab at startup, do one immediate run, then hand off
-    # to cron and tail the log forever.
-    entrypoint:
-      - /usr/bin/tini
-      - --
-      - /bin/sh
-      - -euc
-      - |
-        printf '%s\n' \
-          'BRAVE_API_KEY=${BRAVE_API_KEY}' \
-          "${CRON_SCHEDULE} root cd /state && /usr/local/bin/python /app/batinapapka.py /videos >> /state/cron.log 2>&1" \
-          > /etc/cron.d/batinapapka
-        chmod 0644 /etc/cron.d/batinapapka
-        touch /state/cron.log
-        python /app/batinapapka.py /videos || true
-        cron
-        exec tail -F /state/cron.log
 
 volumes:
   batinapapka_state:

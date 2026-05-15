@@ -27,12 +27,16 @@ Get a Brave API key at <https://brave.com/search/api/>, then:
 ```bash
 export BRAVE_API_KEY=...your key...
 python batinapapka.py /path/to/your/video/files
+# or several at once, recursively:
+python batinapapka.py --recursive /path/A /path/B
 ```
 
 CLI flags:
 
 | Flag | Description |
 | --- | --- |
+| `directories…` | One or more directories. With `--recursive`, each is walked into. |
+| `-r`, `--recursive` | Descend into every subdirectory of each given path. |
 | `--api-key KEY` | Brave Search API key (or set `BRAVE_API_KEY`). |
 | `--clean-cache` | Drop the on-disk cache before processing. |
 | `--force` | Re-process files already listed in `renamed_files.txt`. |
@@ -73,12 +77,11 @@ mkdir -p ~/batinapapka && cd ~/batinapapka
 curl -fsSL https://raw.githubusercontent.com/davnozdu/batinapapka/main/docker-compose.deploy.yml -o docker-compose.yml
 curl -fsSL https://raw.githubusercontent.com/davnozdu/batinapapka/main/.env.example       -o .env
 
-# 2. Fill the env file — at minimum BRAVE_API_KEY
+# 2. Fill BRAVE_API_KEY in .env
 $EDITOR .env
 
-# 3. Drop your videos into ./videos (or set VIDEO_DIR in .env to another path)
-mkdir -p videos
-cp /wherever/*.mp4 videos/
+# 3. Mount your video folder(s) — edit docker-compose.yml's `volumes:` section
+$EDITOR docker-compose.yml
 
 # 4. Pull + run
 docker compose pull
@@ -88,6 +91,25 @@ docker compose logs -f batinapapka
 
 If the GHCR package is still private you'll see `unauthorized` on `pull`. Either flip the package to public once (GitHub → repo → Packages → batinapapka → Package settings → Change visibility → Public), or `docker login ghcr.io -u <github_user>` using a PAT with `read:packages`.
 
+### Mounting video folders
+
+The image's default command is **`--recursive /videos`**, so everything under `/videos` (including subdirectories) is processed. To point one or more host paths at it, edit the `volumes:` section of `docker-compose.yml`:
+
+```yaml
+volumes:
+  # one folder:
+  - ./videos:/videos
+
+  # multiple folders — keep them on distinct mount points:
+  - /mnt/media/movies:/videos/movies
+  - /mnt/nas/clips:/videos/clips
+  - /home/me/downloads:/videos/downloads
+
+  - batinapapka_state:/state    # leave this line alone — it's persistent state
+```
+
+Each mounted subfolder is visited recursively by the same single run, and they share the cache + renamed-files index, so a video already renamed on one mount won't be re-processed when it shows up via another path.
+
 ### `.env` reference
 
 ```env
@@ -95,34 +117,32 @@ If the GHCR package is still private you'll see `unauthorized` on `pull`. Either
 BRAVE_API_KEY=...                       # https://brave.com/search/api/
 
 # Optional
-VIDEO_DIR=/srv/media/videos             # host path; defaults to ./videos
-CRON_SCHEDULE=0 3 * * *                 # cron line for the recurring run
-IMAGE_TAG=latest                        # pin to e.g. 1.2.3 for production
+CRON_SCHEDULE=0 3 * * *                 # cron line for the recurring run.
+                                        # Set CRON_SCHEDULE= (empty) to make
+                                        # the container a one-shot run.
+IMAGE_TAG=1.2.3                         # pin a specific image (defaults to latest)
 ```
 
 ### Updating
 
 ```bash
-# pull latest image and recreate the container
 docker compose pull && docker compose up -d
 ```
 
 If you pinned `IMAGE_TAG=1.2.3` in `.env`, bump it and rerun — `pull` will only fetch the new tag.
 
-### Run once, ad-hoc
-
-For a one-shot run without cron or compose:
+### Run once, ad-hoc (no compose)
 
 ```bash
 docker run --rm \
   -e BRAVE_API_KEY=... \
+  -e CRON_SCHEDULE= \
   -v /path/to/videos:/videos \
   -v "$PWD/state":/state \
-  -w /state \
-  ghcr.io/davnozdu/batinapapka:latest /videos
+  ghcr.io/davnozdu/batinapapka:latest
 ```
 
-The image's `ENTRYPOINT` is the renamer itself; the trailing `/videos` is the directory argument.
+`CRON_SCHEDULE=` (empty) makes the container exit after one pass; otherwise it would stay attached, tailing the cron log. The default `CMD` is `--recursive /videos`, so a single mount under `/videos` is enough; for several folders, mount them as `/videos/A`, `/videos/B`, … and they get processed in one go.
 
 ## Run combined with cyberdrop-dl
 
