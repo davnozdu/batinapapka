@@ -508,6 +508,70 @@ class Stats:
     used_embedded_title: int = 0
 
 
+class ProgressReporter:
+    """Live, single-line progress display for interactive runs.
+
+    Enabled only when stderr is a TTY (so cron and `docker logs` get plain
+    multi-line output instead of a stream of carriage returns). announce()
+    prints a permanent line above the rotating status bar; status() updates
+    the bar in place.
+    """
+
+    _ANSI_CLEAR_LINE = "\r\x1b[2K"
+
+    def __init__(self, enabled: bool):
+        self.enabled = enabled
+        self.total = 0
+        self.current = 0
+        self._last_status = ""
+
+    def start(self, total: int) -> None:
+        self.total = total
+        self.current = 0
+        if self.enabled:
+            sys.stderr.write(f"Found {total} candidate file(s)\n")
+            sys.stderr.flush()
+
+    def tick(self) -> None:
+        self.current += 1
+
+    def _term_width(self) -> int:
+        try:
+            return shutil.get_terminal_size((80, 20)).columns
+        except OSError:
+            return 80
+
+    def status(self, msg: str) -> None:
+        if not self.enabled:
+            return
+        line = f"[{self.current}/{self.total}] {msg}"
+        width = self._term_width()
+        if len(line) > width:
+            line = line[: width - 3] + "..."
+        sys.stderr.write(self._ANSI_CLEAR_LINE + line)
+        sys.stderr.flush()
+        self._last_status = line
+
+    def announce(self, msg: str, error: bool = False) -> None:
+        prefix = f"[{self.current}/{self.total}] " if self.total else ""
+        line = prefix + msg
+        if self.enabled:
+            sys.stderr.write(self._ANSI_CLEAR_LINE + line + "\n")
+            sys.stderr.flush()
+            if self._last_status:
+                sys.stderr.write(self._last_status)
+                sys.stderr.flush()
+        else:
+            stream = sys.stderr if error else sys.stdout
+            stream.write(line + "\n")
+            stream.flush()
+
+    def finish(self) -> None:
+        if self.enabled:
+            sys.stderr.write(self._ANSI_CLEAR_LINE)
+            sys.stderr.flush()
+
+
 # Query variants are tried in order; we stop as soon as choose_best returns a
 # title that clears the threshold. Each variant produces a different `q=` text
 # (and therefore a different cache key), so caching stays consistent.
@@ -540,12 +604,18 @@ def _required_tokens(name: str) -> Set[str]:
 
 
 class VideoFileRenamer:
-    def __init__(self, brave_client: BraveSearchClient, cache: CompressedCache):
+    def __init__(
+        self,
+        brave_client: BraveSearchClient,
+        cache: CompressedCache,
+        progress: Optional[ProgressReporter] = None,
+    ):
         self.cache = cache
         self.brave_client = brave_client
         self.title = TitleProcessor()
         self.renamed_files = self._load_renamed()
         self.stats = Stats()
+        self.progress = progress or ProgressReporter(enabled=False)
 
     def _load_renamed(self) -> Set[str]:
         if not os.path.exists(RENAMED_FILES_LOG):
@@ -693,9 +763,23 @@ class VideoFileRenamer:
         logger.info("Starting rename in %s", directory)
         started = time.time()
 
-        for filename in os.listdir(directory):
+        # Pre-flight: enumerate the candidate videos once so the progress
+        # reporter has a real total to show ("[3/42] processing X…").
+        candidates: List[str] = []
+        for filename in sorted(os.listdir(directory)):
+            if filename.startswith("."):
+                continue
+            ext = os.path.splitext(filename)[1].lower()
+            if ext in VIDEO_EXTENSIONS:
+                candidates.append(filename)
+
+        self.progress.start(len(candidates))
+
+        for filename in candidates:
+            self.progress.tick()
             try:
                 if not self._should_process(filename, force):
+                    self.progress.announce(f"skip {filename}")
                     continue
                 self.stats.processed += 1
 
@@ -707,24 +791,25 @@ class VideoFileRenamer:
                     with open(path, "rb"):
                         pass
                 except PermissionError:
+                    self.progress.announce(f"ERROR locked: {filename}", error=True)
                     logger.error("File locked: %s", filename)
                     self.stats.errors += 1
                     continue
 
                 file_date = datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d")
 
+                self.progress.status(f"{filename}")
                 logger.info("Processing %s", filename)
+
                 embedded = ffprobe_title(path)
                 if embedded:
                     logger.info('Embedded title: "%s"', embedded)
                     self.stats.used_embedded_title += 1
 
+                self.progress.status(f"searching: {filename}")
                 date, new_title, merged = self._cascade_search(base, embedded)
 
                 if not new_title:
-                    # Last-resort fallback: use the embedded title if it
-                    # exists, otherwise the cleaned filename. mtime stands in
-                    # for the unknown publication date.
                     if embedded and len(embedded) >= 3:
                         new_title = self.title.clean_title(embedded)
                         if not new_title:
@@ -747,12 +832,15 @@ class VideoFileRenamer:
                 shutil.move(path, new_path)
                 self._mark_renamed(new_filename)
                 logger.info('Renamed "%s" -> "%s"', filename, new_filename)
+                self.progress.announce(f"renamed {filename} -> {new_filename}")
                 self.stats.renamed += 1
 
             except Exception as e:  # noqa: BLE001 — never let one bad file kill the run
                 logger.exception("Error processing %s: %s", filename, e)
+                self.progress.announce(f"ERROR {filename}: {e}", error=True)
                 self.stats.errors += 1
 
+        self.progress.finish()
         self.cache.save()
         logger.info(
             "Done in %.2fs. Stats: %s",
@@ -782,7 +870,13 @@ def parse_args() -> argparse.Namespace:
                         help="Drop the on-disk cache before processing")
     parser.add_argument("--force", action="store_true",
                         help="Re-process files already listed in renamed_files.txt")
-    parser.add_argument("--debug", action="store_true", help="Verbose logging")
+    parser.add_argument("-v", "--verbose", action="store_true",
+                        help="Stream every INFO event to stderr (disables the "
+                             "live progress bar)")
+    parser.add_argument("-q", "--quiet", action="store_true",
+                        help="Silence the progress bar even on a TTY")
+    parser.add_argument("--debug", action="store_true",
+                        help="Maximum verbosity: DEBUG-level events to stderr")
     return parser.parse_args()
 
 
@@ -820,18 +914,54 @@ def _expand_targets(roots: List[str], recursive: bool) -> List[str]:
     return targets
 
 
-def configure_logging(debug: bool) -> None:
-    handler = RotatingFileHandler(LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=7)
-    handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
+def configure_logging(debug: bool, verbose: bool, show_progress: bool) -> None:
+    """Wire up the logger.
+
+    - File handler (rotating) always gets every INFO+ event for the archive.
+    - Console handler streams to stderr; level depends on flags:
+        --debug         → DEBUG
+        --verbose       → INFO
+        progress on     → WARNING (keeps the progress line uncluttered;
+                                   the file log still has every detail)
+        default         → INFO
+    """
+    fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+
+    file_handler = RotatingFileHandler(LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=7)
+    file_handler.setFormatter(fmt)
+    file_handler.setLevel(logging.DEBUG if debug else logging.INFO)
+
+    console_handler = logging.StreamHandler(sys.stderr)
+    console_handler.setFormatter(logging.Formatter("[%(levelname)s] %(message)s"))
+    if debug:
+        console_level = logging.DEBUG
+    elif verbose:
+        console_level = logging.INFO
+    elif show_progress:
+        console_level = logging.WARNING
+    else:
+        console_level = logging.INFO
+    console_handler.setLevel(console_level)
+
     root = logging.getLogger()
     root.handlers.clear()
-    root.addHandler(handler)
+    root.addHandler(file_handler)
+    root.addHandler(console_handler)
     root.setLevel(logging.DEBUG if debug else logging.INFO)
 
 
 def main() -> int:
     args = parse_args()
-    configure_logging(args.debug)
+
+    # Live progress bar only on interactive terminals, and only when the
+    # user hasn't asked for the noisier alternatives.
+    show_progress = (
+        sys.stderr.isatty()
+        and not args.quiet
+        and not args.verbose
+        and not args.debug
+    )
+    configure_logging(args.debug, args.verbose, show_progress)
 
     if not args.api_key:
         logger.error("Brave API key missing (use --api-key or BRAVE_API_KEY env var)")
@@ -851,15 +981,20 @@ def main() -> int:
 
     cache = CompressedCache(CACHE_FILE, CACHE_TTL_DAYS)
     brave = BraveSearchClient(args.api_key, cache)
-    renamer = VideoFileRenamer(brave, cache)
+    progress = ProgressReporter(enabled=show_progress)
+    renamer = VideoFileRenamer(brave, cache, progress=progress)
     try:
         for target in targets:
             logger.info("Target directory: %s", target)
+            if show_progress:
+                sys.stderr.write(f"\n=== {target} ===\n")
+                sys.stderr.flush()
             try:
                 renamer.process(target, force=args.force)
             except (ValueError, OSError) as e:
                 logger.error("Skipping %s: %s", target, e)
     except KeyboardInterrupt:
+        progress.finish()
         logger.info("Interrupted by user")
         cache.save()
         return 130

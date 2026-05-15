@@ -146,10 +146,25 @@ docker compose -f batinapapka_cyberdrop-dl.yaml exec batinapapka_cyberdrop  bati
 
 ```bash
 ssh -p 2222 "$SHELL_USER"@host
-batinapapka --recursive /videos        # full default run
-batinapapka --debug /videos/movies     # one folder, verbose
+batinapapka --recursive /videos        # default — live progress on the terminal
+batinapapka -v --recursive /videos     # stream every INFO line instead of progress
+batinapapka --debug /videos/movies     # DEBUG verbosity (HTTP traces, etc.)
+batinapapka -q --recursive /videos     # silence the progress bar, only print final stats
 batinapapka --clean-cache --recursive /videos  # drop cache first
 ```
+
+When you run interactively (stderr is a TTY) the terminal shows:
+
+```
+=== /videos/movies ===
+Found 42 candidate file(s)
+[ 1/42] renamed Big.Buck.Bunny.1080p.mp4 -> 2024-08-12 Big Buck Bunny.mp4
+[ 2/42] renamed sintel_trailer_2010.mkv  -> 2026-05-15 Sintel.mkv
+[ 3/42] ERROR locked: in_progress_download.mp4
+[ 4/42] searching: Mia.Khalifa.example.mp4_       ← live rotating line
+```
+
+Each completed file (success, skip, or error) prints a permanent line above; the bottom line is the rotating status of the file currently being looked up against Brave. Errors are also written to stderr so they survive a piped log too. The full INFO/DEBUG trace is in `/state/file_renamer.log` regardless of which mode you picked.
 
 If you really want to bypass the container entirely:
 
