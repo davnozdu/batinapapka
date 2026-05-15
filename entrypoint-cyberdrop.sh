@@ -7,8 +7,34 @@
 set -eu
 
 : "${STATE_DIR:=/state}"
-mkdir -p "$STATE_DIR" /run/sshd
+mkdir -p "$STATE_DIR" /run/sshd /videos
 cd "$STATE_DIR"
+
+# Point default download folders at the mounted /videos. cyberdrop-dl writes
+# to ~/Downloads by default; aliasing it via symlink means downloads land in
+# /videos with no extra flags, and the renamer cron job then picks them up.
+#
+# IMPORTANT: never `rm -rf` the target — if it already is a symlink to
+# /videos, recursive rm would delete the contents of the mounted volume.
+link_downloads() {
+    target_home="$1"
+    [ -d "$target_home" ] || return 0
+    dl="$target_home/Downloads"
+    # If there's already a real (non-symlink) directory there, leave it alone:
+    # the user may have set it up deliberately.
+    if [ -d "$dl" ] && [ ! -L "$dl" ]; then
+        return 0
+    fi
+    rm -f "$dl"
+    ln -sfn /videos "$dl"
+    [ -n "${2:-}" ] && chown -h "$2:$2" "$dl" 2>/dev/null || true
+}
+
+# Make sure SSH host keys exist on slim images where the postinst hook
+# may not have created them yet.
+[ -f /etc/ssh/ssh_host_ed25519_key ] || ssh-keygen -A >/dev/null
+
+link_downloads "/root"
 
 if [ -n "${SHELL_USER:-}" ] && [ -n "${SHELL_PASSWORD:-}" ]; then
     if ! id -u "$SHELL_USER" >/dev/null 2>&1; then
@@ -16,8 +42,10 @@ if [ -n "${SHELL_USER:-}" ] && [ -n "${SHELL_PASSWORD:-}" ]; then
         usermod -aG sudo "$SHELL_USER"
     fi
     echo "$SHELL_USER:$SHELL_PASSWORD" | chpasswd
+    link_downloads "/home/$SHELL_USER" "$SHELL_USER"
     /etc/init.d/ssh start
-    echo "[entrypoint] SSH enabled for user '$SHELL_USER' on port 22"
+    echo "[entrypoint] SSH on :22 for user '$SHELL_USER'. cyberdrop-dl,"
+    echo "[entrypoint] tmux and screen are on PATH. ~/Downloads -> /videos."
 elif [ -n "${SHELL_USER:-}" ] || [ -n "${SHELL_PASSWORD:-}" ]; then
     echo "[entrypoint] both SHELL_USER and SHELL_PASSWORD must be set together" >&2
     exit 2
