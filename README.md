@@ -73,10 +73,14 @@ mkdir -p ~/batinapapka && cd ~/batinapapka
 curl -fsSL https://raw.githubusercontent.com/davnozdu/batinapapka/main/docker-compose.deploy.yml -o docker-compose.yml
 curl -fsSL https://raw.githubusercontent.com/davnozdu/batinapapka/main/.env.example       -o .env
 
-# 2. Fill the env file — at minimum BRAVE_API_KEY and VIDEO_DIR
+# 2. Fill the env file — at minimum BRAVE_API_KEY
 $EDITOR .env
 
-# 3. Pull + run
+# 3. Drop your videos into ./videos (or set VIDEO_DIR in .env to another path)
+mkdir -p videos
+cp /wherever/*.mp4 videos/
+
+# 4. Pull + run
 docker compose pull
 docker compose up -d
 docker compose logs -f batinapapka
@@ -89,9 +93,9 @@ If the GHCR package is still private you'll see `unauthorized` on `pull`. Either
 ```env
 # Required
 BRAVE_API_KEY=...                       # https://brave.com/search/api/
-VIDEO_DIR=/srv/media/videos             # host path mounted into /videos
 
 # Optional
+VIDEO_DIR=/srv/media/videos             # host path; defaults to ./videos
 CRON_SCHEDULE=0 3 * * *                 # cron line for the recurring run
 IMAGE_TAG=latest                        # pin to e.g. 1.2.3 for production
 ```

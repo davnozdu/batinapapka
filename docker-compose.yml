@@ -8,7 +8,9 @@ services:
       BRAVE_API_KEY: ${BRAVE_API_KEY:?set BRAVE_API_KEY in .env or shell}
       CRON_SCHEDULE: ${CRON_SCHEDULE:-0 3 * * *}
     volumes:
-      - ${VIDEO_DIR:?set VIDEO_DIR in .env or shell}:/videos
+      # By default mounts ./videos next to this compose file. Override with
+      # VIDEO_DIR=/some/host/path in .env to point at another location.
+      - ${VIDEO_DIR:-./videos}:/videos
       - batinapapka_state:/state
     working_dir: /state
     # Override the image's ENTRYPOINT: install a crontab on startup, do an
