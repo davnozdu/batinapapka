@@ -85,6 +85,14 @@ if [ -n "${SHELL_USER:-}" ] && [ -n "${SHELL_PASSWORD:-}" ]; then
         usermod -aG sudo "$SHELL_USER"
     fi
     echo "$SHELL_USER:$SHELL_PASSWORD" | chpasswd
+
+    # Hand the state and videos volumes to SHELL_USER so manual renamer runs
+    # from SSH can write the cache, log and renamed-files index. The cron
+    # job below runs as SHELL_USER too — that keeps file ownership consistent
+    # between automated and interactive runs.
+    chown -R "$SHELL_USER:$SHELL_USER" "$STATE_DIR" 2>/dev/null || true
+    chown    "$SHELL_USER:$SHELL_USER" /videos      2>/dev/null || true
+
     link_downloads "/home/$SHELL_USER" "$SHELL_USER"
     link_cyberdrop_state "/home/$SHELL_USER" "$SHELL_USER"
     /etc/init.d/ssh start
@@ -116,12 +124,16 @@ if [ -n "${CRON_SCHEDULE:-}" ]; then
         exit 2
     fi
 
+    # If SHELL_USER is configured, run the cron job as that user so it shares
+    # ownership with manual SSH runs. Otherwise fall back to root.
+    cron_user="${SHELL_USER:-root}"
     {
         echo "BRAVE_API_KEY=${BRAVE_API_KEY}"
-        echo "${CRON_SCHEDULE} root cd ${STATE_DIR} && ${RENAMER} >> ${STATE_DIR}/cron.log 2>&1"
+        echo "${CRON_SCHEDULE} ${cron_user} cd ${STATE_DIR} && ${RENAMER} >> ${STATE_DIR}/cron.log 2>&1"
     } > /etc/cron.d/batinapapka
     chmod 0644 /etc/cron.d/batinapapka
     touch "${STATE_DIR}/cron.log"
+    [ -n "${SHELL_USER:-}" ] && chown "$SHELL_USER:$SHELL_USER" "${STATE_DIR}/cron.log" 2>/dev/null || true
 
     # Expose BRAVE_API_KEY to interactive SSH sessions via PAM
     # (`pam_env` reads /etc/environment by default on Debian).
@@ -132,7 +144,14 @@ if [ -n "${CRON_SCHEDULE:-}" ]; then
     fi
 
     echo "[entrypoint] one-shot run (cron schedule: ${CRON_SCHEDULE})"
-    sh -c "$RENAMER" || true
+    # Match the cron job's UID: if SHELL_USER is configured, drop privileges
+    # so the cache, log and renamed-files index are owned by the same user
+    # who'll touch them later from SSH and from cron.
+    if [ -n "${SHELL_USER:-}" ]; then
+        su -p -s /bin/sh -c "$RENAMER" "$SHELL_USER" || true
+    else
+        sh -c "$RENAMER" || true
+    fi
 
     cron
     exec tail -F "${STATE_DIR}/cron.log"
