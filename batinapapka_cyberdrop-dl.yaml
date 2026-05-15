@@ -1,103 +1,38 @@
-# Combined stack: batinapapka renamer + cyberdrop-dl, with an SSH side-car
-# for occasional interactive access. Secrets and host-specific bits are read
-# from environment variables (see .env.example) — do NOT inline them here.
+# Combined deployment: batinapapka renamer + cyberdrop-dl + SSH side-car.
+# Pulls the prebuilt image from GHCR — no local build, no apt-get on startup.
+#
+# Quick start:
+#   curl -fsSL https://raw.githubusercontent.com/davnozdu/batinapapka/main/batinapapka_cyberdrop-dl.yaml -o docker-compose.yml
+#   curl -fsSL https://raw.githubusercontent.com/davnozdu/batinapapka/main/.env.example                  -o .env
+#   $EDITOR .env                  # set BRAVE_API_KEY, SHELL_USER, SHELL_PASSWORD
+#   $EDITOR docker-compose.yml    # mount your video folder(s) under `volumes:`
+#   docker compose pull
+#   docker compose up -d
+#   ssh -p 2222 "${SHELL_USER}"@host   # `cyberdrop-dl` is on PATH inside
 
 services:
   batinapapka_cyberdrop:
-    image: python:3.12-slim-bookworm
+    image: ghcr.io/davnozdu/batinapapka-cyberdrop:${IMAGE_TAG:-latest}
+    pull_policy: always
     container_name: batinapapka_cyberdrop
     restart: unless-stopped
 
     environment:
       BRAVE_API_KEY: ${BRAVE_API_KEY:?set BRAVE_API_KEY in .env or shell}
-      # Interactive user for SSH access. Both must be set together.
+      CRON_SCHEDULE: "0 3 * * *"
       SHELL_USER: ${SHELL_USER:?set SHELL_USER in .env or shell}
       SHELL_PASSWORD: ${SHELL_PASSWORD:?set SHELL_PASSWORD in .env or shell}
-      CRON_SCHEDULE: ${CRON_SCHEDULE:-0 3 * * *}
-      # Pin the renamer script to a tagged release so a container restart never
-      # silently pulls a breaking change. Override at deploy time if needed.
-      BATINAPAPKA_REF: ${BATINAPAPKA_REF:-main}
+
+    ports:
+      - "2222:22"     # ssh -p 2222 <SHELL_USER>@host
 
     volumes:
-      # Mount any number of host folders. Default command is recursive,
-      # so subdirectories under /videos are processed automatically.
+      # Mount any number of host folders under /videos. The default command
+      # is `--recursive /videos`, so subdirectories are processed too.
       - ./videos:/videos
       # - /mnt/media/movies:/videos/movies
       # - /mnt/nas/clips:/videos/clips
       - batinapapka_state:/state
 
-    ports:
-      - "2222:22"
-
-    working_dir: /usr/src/app
-    stdin_open: true
-    tty: true
-
-    command:
-      - /bin/sh
-      - -euc
-      - |
-        apt-get update
-        apt-get install -y --no-install-recommends \
-          ffmpeg cron curl openssh-server sudo tmux python3-venv ca-certificates
-        rm -rf /var/lib/apt/lists/*
-
-        pip install --no-cache-dir --upgrade pip
-        pip install --no-cache-dir \
-          'requests==2.32.3' 'rapidfuzz==3.10.1' 'Unidecode==1.3.8'
-
-        curl -fsSL -o /usr/src/app/batinapapka.py \
-          "https://raw.githubusercontent.com/davnozdu/batinapapka/${BATINAPAPKA_REF}/batinapapka.py"
-
-        mkdir -p /usr/src/app/cyberdrop
-        cd /usr/src/app/cyberdrop
-        if [ ! -d venv ]; then python3 -m venv venv; fi
-        . venv/bin/activate
-        python3 -m pip install --upgrade pip
-        python3 -m pip uninstall -y -q cyberdrop-dl || true
-        python3 -m pip install --upgrade cyberdrop-dl-patched
-        ln -sf /usr/src/app/cyberdrop/venv/bin/cyberdrop-dl /usr/local/bin/cyberdrop-dl
-        deactivate
-
-        mkdir -p /run/sshd /var/log
-        service ssh start
-
-        if ! id -u "${SHELL_USER}" >/dev/null 2>&1; then
-          useradd -m -s /bin/bash "${SHELL_USER}"
-          usermod -aG sudo "${SHELL_USER}"
-        fi
-        echo "${SHELL_USER}:${SHELL_PASSWORD}" | chpasswd
-
-        # Cron picks up env via /etc/environment + the wrapper script.
-        echo "BRAVE_API_KEY=${BRAVE_API_KEY}" > /etc/environment
-
-        cat >/usr/local/bin/run-batinapapka <<'WRAP'
-        #!/bin/sh
-        set -eu
-        . /etc/environment
-        export BRAVE_API_KEY
-        cd /state
-        exec /usr/local/bin/python /usr/src/app/batinapapka.py --recursive /videos
-        WRAP
-        chmod +x /usr/local/bin/run-batinapapka
-
-        echo "${CRON_SCHEDULE} root /usr/local/bin/run-batinapapka >> /state/cron.log 2>&1" \
-          > /etc/cron.d/batinapapka
-        chmod 0644 /etc/cron.d/batinapapka
-        touch /state/cron.log
-
-        # One immediate run so the container is useful before the first cron tick.
-        run-batinapapka || true
-
-        cron
-        exec tail -F /state/cron.log
-
-    networks:
-      - rename_net
-
 volumes:
   batinapapka_state:
-
-networks:
-  rename_net:
-    driver: bridge

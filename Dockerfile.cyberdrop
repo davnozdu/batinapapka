@@ -1,0 +1,41 @@
+FROM python:3.12-slim-bookworm
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+        cron \
+        tini \
+        ffmpeg \
+        ca-certificates \
+        openssh-server \
+        sudo \
+        tmux \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.txt ./
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Install cyberdrop-dl-patched in its own venv so its deps don't collide
+# with the renamer's. Symlink the CLI onto PATH for interactive use.
+RUN python3 -m venv /opt/cyberdrop/venv \
+ && /opt/cyberdrop/venv/bin/pip install --no-cache-dir --upgrade pip \
+ && /opt/cyberdrop/venv/bin/pip install --no-cache-dir cyberdrop-dl-patched \
+ && ln -s /opt/cyberdrop/venv/bin/cyberdrop-dl /usr/local/bin/cyberdrop-dl
+
+COPY batinapapka.py ./
+COPY entrypoint-cyberdrop.sh /usr/local/bin/batinapapka-cyberdrop-entrypoint
+RUN chmod +x /usr/local/bin/batinapapka-cyberdrop-entrypoint
+
+VOLUME ["/state", "/videos"]
+WORKDIR /state
+
+EXPOSE 22
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/batinapapka-cyberdrop-entrypoint"]
+CMD ["--recursive", "/videos"]

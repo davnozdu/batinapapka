@@ -146,21 +146,22 @@ docker run --rm \
 
 ## Run combined with cyberdrop-dl
 
-`batinapapka_cyberdrop-dl.yaml` adds `cyberdrop-dl-patched` and an SSH side-car for interactive use. Same `.env` plus two extra variables:
-
-```env
-SHELL_USER=youruser
-SHELL_PASSWORD=...
-```
-
-Then:
+A second image, **`ghcr.io/davnozdu/batinapapka-cyberdrop`**, ships the renamer plus `cyberdrop-dl-patched` and an SSH side-car. Same workflow as the slim deploy, just a different compose file:
 
 ```bash
-docker compose -f batinapapka_cyberdrop-dl.yaml up -d
-ssh -p 2222 youruser@host
+mkdir -p ~/batinapapka-cyberdrop && cd ~/batinapapka-cyberdrop
+curl -fsSL https://raw.githubusercontent.com/davnozdu/batinapapka/main/batinapapka_cyberdrop-dl.yaml -o docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/davnozdu/batinapapka/main/.env.example                 -o .env
+
+$EDITOR .env       # set BRAVE_API_KEY, SHELL_USER, SHELL_PASSWORD
+$EDITOR docker-compose.yml   # mount your video folder(s)
+
+docker compose pull
+docker compose up -d
+ssh -p 2222 "${SHELL_USER}"@host    # cyberdrop-dl is on PATH inside
 ```
 
-The script URL is pinned to `BATINAPAPKA_REF` (default `main`). For production set it to a tagged release so a container restart can never silently pull a breaking change.
+This image is amd64-only (some `cyberdrop-dl-patched` transitive deps have no prebuilt arm64 wheels). The slim `batinapapka` image stays multi-arch.
 
 ## Example
 

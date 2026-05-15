@@ -10,10 +10,8 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
   # Force the JavaScript-based actions onto Node.js 24 ahead of GitHub's
-  # forced migration on 2026-06-02. Removes the deprecation warning emitted
-  # by actions/checkout, docker/* and friends.
+  # forced migration on 2026-06-02.
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
@@ -23,6 +21,21 @@ jobs:
       contents: read
       packages: write
       id-token: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: batinapapka
+            dockerfile: Dockerfile
+            image: ghcr.io/davnozdu/batinapapka
+            platforms: linux/amd64,linux/arm64
+          - name: batinapapka-cyberdrop
+            dockerfile: Dockerfile.cyberdrop
+            image: ghcr.io/davnozdu/batinapapka-cyberdrop
+            # cyberdrop-dl-patched does not always have prebuilt arm64 wheels
+            # for its transitive deps; pin to amd64 to keep CI green.
+            platforms: linux/amd64
 
     steps:
       - name: Checkout
@@ -46,7 +59,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          images: ${{ matrix.image }}
           tags: |
             type=ref,event=branch
             type=ref,event=pr
@@ -56,20 +69,21 @@ jobs:
             type=sha,format=short
             type=raw,value=latest,enable={{is_default_branch}}
           labels: |
-            org.opencontainers.image.title=batinapapka
-            org.opencontainers.image.description=Adult video file renamer using Brave Search
+            org.opencontainers.image.title=${{ matrix.name }}
+            org.opencontainers.image.description=Adult video file renamer using Brave Search (${{ matrix.name }} variant)
             org.opencontainers.image.licenses=MIT
 
-      - name: Build and push
+      - name: Build and push ${{ matrix.name }}
         id: build
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          file: ${{ matrix.dockerfile }}
+          platforms: ${{ matrix.platforms }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max
           provenance: true
           sbom: true
