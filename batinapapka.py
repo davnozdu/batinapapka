@@ -509,28 +509,37 @@ class Stats:
 
 
 class ProgressReporter:
-    """Live, single-line progress display for interactive runs.
+    """Two-line live dashboard for interactive runs.
 
-    Enabled only when stderr is a TTY (so cron and `docker logs` get plain
-    multi-line output instead of a stream of carriage returns). announce()
-    prints a permanent line above the rotating status bar; status() updates
-    the bar in place.
+    Top line: counter + current file being searched for.
+    Bottom line: most recent successful rename.
+
+    Both repaint in place via ANSI escapes; the dashboard collapses cleanly
+    around errors (they print persistently above) and disappears on
+    finish(). Off-TTY runs (cron / docker logs) get a plain "one event per
+    line" stream so the log stays readable.
     """
 
-    _ANSI_CLEAR_LINE = "\r\x1b[2K"
+    _CLR = "\r\x1b[2K"   # carriage return + erase entire line
+    _UP  = "\x1b[A"      # move cursor up one line
 
     def __init__(self, enabled: bool):
         self.enabled = enabled
         self.total = 0
         self.current = 0
-        self._last_status = ""
+        self.current_file = ""
+        self.last_renamed = ""
+        self._rendered = False
 
     def start(self, total: int) -> None:
         self.total = total
         self.current = 0
+        self.current_file = ""
 
     def tick(self) -> None:
         self.current += 1
+
+    # --- internal ---------------------------------------------------------
 
     def _term_width(self) -> int:
         try:
@@ -538,46 +547,76 @@ class ProgressReporter:
         except OSError:
             return 80
 
-    def status(self, msg: str) -> None:
-        """Update the single rotating status line in place (TTY only)."""
+    @staticmethod
+    def _truncate(s: str, width: int) -> str:
+        return s if len(s) <= width else s[: width - 3] + "..."
+
+    def _erase(self) -> None:
+        """Move cursor back over the two-line dashboard and erase it."""
+        if not self._rendered:
+            return
+        sys.stderr.write(self._UP + self._CLR + self._UP + self._CLR)
+        sys.stderr.flush()
+        self._rendered = False
+
+    def _paint(self) -> None:
         if not self.enabled:
             return
-        line = f"[{self.current}/{self.total}] {msg}"
         width = self._term_width()
-        if len(line) > width:
-            line = line[: width - 3] + "..."
-        sys.stderr.write(self._ANSI_CLEAR_LINE + line)
+        line1 = self._truncate(
+            f"[{self.current}/{self.total}] searching: {self.current_file}", width
+        )
+        line2 = self._truncate(
+            f"     last renamed: {self.last_renamed or '-'}", width
+        )
+        self._erase()
+        sys.stderr.write(self._CLR + line1 + "\n")
+        sys.stderr.write(self._CLR + line2 + "\n")
         sys.stderr.flush()
-        self._last_status = line
+        self._rendered = True
 
-    def announce(self, msg: str, error: bool = False) -> None:
-        """Surface a per-file event.
+    # --- public events ----------------------------------------------------
 
-        TTY mode: only errors break out of the rotating line as a permanent
-        message above it. Successful renames and skips are silent — the
-        counter in the status line is the only "I'm making progress" signal.
-        Off-TTY (cron, docker logs): everything is printed line by line so
-        the run is still inspectable from logs.
-        """
-        prefix = f"[{self.current}/{self.total}] " if self.total else ""
-        line = prefix + msg
+    def status(self, filename: str) -> None:
+        """Refresh the 'currently working on' line."""
+        if not self.enabled:
+            return
+        self.current_file = filename
+        self._paint()
+
+    def renamed(self, old: str, new: str) -> None:
+        """A successful rename — update the 'last renamed' line."""
         if self.enabled:
-            if not error:
-                return
-            sys.stderr.write(self._ANSI_CLEAR_LINE + line + "\n")
-            sys.stderr.flush()
-            if self._last_status:
-                sys.stderr.write(self._last_status)
-                sys.stderr.flush()
+            self.last_renamed = f"{old} → {new}"
+            self._paint()
         else:
-            stream = sys.stderr if error else sys.stdout
-            stream.write(line + "\n")
-            stream.flush()
+            sys.stdout.write(f"[{self.current}/{self.total}] renamed {old} -> {new}\n")
+            sys.stdout.flush()
+
+    def skipped(self, filename: str) -> None:
+        """File was filtered out before processing (already-renamed, hidden, …)."""
+        if not self.enabled:
+            sys.stdout.write(f"[{self.current}/{self.total}] skip {filename}\n")
+            sys.stdout.flush()
+        # In TTY mode the counter advances silently; no second-line update
+        # — the bottom line still holds the last *successful* rename.
+
+    def error(self, msg: str) -> None:
+        """Permanent error line above the dashboard."""
+        prefix = f"[{self.current}/{self.total}] " if self.total else ""
+        line = prefix + "ERROR " + msg
+        if self.enabled:
+            self._erase()
+            sys.stderr.write(self._CLR + line + "\n")
+            sys.stderr.flush()
+            self._paint()
+        else:
+            sys.stderr.write(line + "\n")
+            sys.stderr.flush()
 
     def finish(self) -> None:
         if self.enabled:
-            sys.stderr.write(self._ANSI_CLEAR_LINE)
-            sys.stderr.flush()
+            self._erase()
 
 
 # Query variants are tried in order; we stop as soon as choose_best returns a
@@ -788,7 +827,7 @@ class VideoFileRenamer:
             self.progress.status(filename)
             try:
                 if not self._should_process(filename, force):
-                    self.progress.announce(f"skip {filename}")
+                    self.progress.skipped(filename)
                     continue
                 self.stats.processed += 1
 
@@ -800,14 +839,12 @@ class VideoFileRenamer:
                     with open(path, "rb"):
                         pass
                 except PermissionError:
-                    self.progress.announce(f"ERROR locked: {filename}", error=True)
+                    self.progress.error(f"locked: {filename}")
                     logger.error("File locked: %s", filename)
                     self.stats.errors += 1
                     continue
 
                 file_date = datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d")
-
-                self.progress.status(f"{filename}")
                 logger.info("Processing %s", filename)
 
                 embedded = ffprobe_title(path)
@@ -815,7 +852,6 @@ class VideoFileRenamer:
                     logger.info('Embedded title: "%s"', embedded)
                     self.stats.used_embedded_title += 1
 
-                self.progress.status(f"searching: {filename}")
                 date, new_title, merged = self._cascade_search(base, embedded)
 
                 if not new_title:
@@ -841,12 +877,12 @@ class VideoFileRenamer:
                 shutil.move(path, new_path)
                 self._mark_renamed(new_filename)
                 logger.info('Renamed "%s" -> "%s"', filename, new_filename)
-                self.progress.announce(f"renamed {filename} -> {new_filename}")
+                self.progress.renamed(filename, new_filename)
                 self.stats.renamed += 1
 
             except Exception as e:  # noqa: BLE001 — never let one bad file kill the run
                 logger.exception("Error processing %s: %s", filename, e)
-                self.progress.announce(f"ERROR {filename}: {e}", error=True)
+                self.progress.error(f"{filename}: {e}")
                 self.stats.errors += 1
 
         self.progress.finish()

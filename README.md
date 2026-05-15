@@ -153,22 +153,24 @@ batinapapka -q --recursive /videos     # silence the progress bar, only print fi
 batinapapka --clean-cache --recursive /videos  # drop cache first
 ```
 
-When you run interactively (stderr is a TTY) the terminal shows a **single rotating line** updated in place:
+When you run interactively (stderr is a TTY) the terminal shows a **two-line dashboard** updated in place:
 
 ```
-[ 47/420] searching: Big.Buck.Bunny.1080p.mp4_
+[ 47/420] searching: Big.Buck.Bunny.1080p.mp4
+     last renamed: Mia.Khalifa.example.mp4 → 2026-03-13 Mia Khalifa.mp4
 ```
 
-The number on the left ticks up as files are processed; the filename changes as the renamer moves through the list. Only errors break out of the line and print permanently above (so a piped log is still useful):
+Top line — counter + the file currently being looked up against Brave. Bottom line — the most recent successful rename. Both lines repaint in place; nothing scrolls until an **error** happens, which prints permanently above the dashboard so a piped log still has it:
 
 ```
 [ 53/420] ERROR locked: in_progress_download.mp4
-[ 54/420] searching: Mia.Khalifa.example.mp4_     ← rotating line resumes below
+[ 54/420] searching: Mia.Khalifa.example.mp4
+     last renamed: sintel_trailer_2010.mkv → 2026-05-15 Sintel.mkv
 ```
 
-Every per-file detail (matched title, score, cache hits, …) still lands in `/state/file_renamer.log`; the rotating line is just a "I'm alive" indicator.
+Every per-file detail (matched title, score, cache hits, …) still lands in `/state/file_renamer.log`; the dashboard is just a "I'm alive" indicator.
 
-In **`-v / --verbose`** the rotating line is replaced with the full INFO stream — every `Processing …`, `Brave returned N results`, `Renamed X -> Y` event printed on its own line. **Off-TTY** runs (cron, `docker logs`) always behave like `--verbose`: full line-by-line output, no carriage returns.
+In **`-v / --verbose`** the dashboard is replaced with the full INFO stream — every `Processing …`, `Brave returned N results`, `Renamed X -> Y` event printed on its own line. **Off-TTY** runs (cron, `docker logs`) always behave like `--verbose`: full line-by-line output, no carriage returns.
 
 If you really want to bypass the container entirely:
 
