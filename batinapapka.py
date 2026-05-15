@@ -36,7 +36,11 @@ LOG_FILE = "file_renamer.log"
 RENAMED_FILES_LOG = "renamed_files.txt"
 CACHE_FILE = "search_cache.json.gz"
 CACHE_TTL_DAYS = 30
-SIMILARITY_THRESHOLD = 0.50
+SIMILARITY_THRESHOLD = 0.60
+# Stricter threshold for filenames with no strong signal (no Capitalized
+# names, no year) — we don't trust a borderline match when there's nothing
+# in the input to disambiguate it.
+SIMILARITY_THRESHOLD_WEAK_SIGNAL = 0.70
 MIN_FREE_SPACE_BYTES = 100 * 1024 * 1024
 REQUEST_TIMEOUT = 10
 FFPROBE_TIMEOUT = 5
@@ -91,6 +95,11 @@ _CLEAN_PATTERNS = [
         r"\b(com|net|org|xxx)\b",
         r"\b\d{3,4}x\d{3,4}\b",
         r"\b\d+(\.\d+)?\s*(MB|GB|TB)\b",
+        # SEO boilerplate from adult-video site titles. These are noise added
+        # by the host, not part of the actual video name.
+        r"\b(Porn|Sex|Adult|XXX)\s+(Videos?|Movies?|Tube|Clips?|Films?)\b",
+        r"\b(Free|Watch|Download|Best|Top|Hot|New|Latest|Premium)\b",
+        r"\b(Online|Streaming|HD|Quality)\b",
     )
 ]
 
@@ -413,7 +422,12 @@ class TitleProcessor:
                 best_title = self.clean_title(title)
                 best_date = page_date
 
-        if best_score < SIMILARITY_THRESHOLD:
+        # Filenames with no Capitalized name tokens and no year are
+        # "low-signal" — they can match almost anything, so demand a higher
+        # threshold to avoid false positives like IMG_20240101_xxx.
+        has_signal = bool(required_tokens) or bool(year_hint)
+        threshold = SIMILARITY_THRESHOLD if has_signal else SIMILARITY_THRESHOLD_WEAK_SIGNAL
+        if best_score < threshold:
             return None, None, best_score
         return best_date, best_title, best_score
 
