@@ -20,7 +20,8 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY requirements.txt requirements-admin.txt ./
-RUN pip install --no-cache-dir -r requirements.txt -r requirements-admin.txt
+RUN pip install --no-cache-dir --upgrade pip \
+ && pip install --no-cache-dir -r requirements.txt -r requirements-admin.txt
 
 # Install cyberdrop-dl-patched in its own venv so its deps don't collide
 # with the renamer's. Symlink the CLI onto PATH for interactive use.

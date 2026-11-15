@@ -16,7 +16,8 @@ RUN apt-get update \
 WORKDIR /app
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --upgrade pip \
+ && pip install --no-cache-dir -r requirements.txt
 
 COPY batinapapka.py configure_cron.py ./
 COPY entrypoint.sh /usr/local/bin/batinapapka-entrypoint

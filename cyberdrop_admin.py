@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+import codecs
 import fcntl
 import hmac
 import json
@@ -160,8 +161,12 @@ class Queue:
                     env=os.environ | {'PYTHONUNBUFFERED': '1', 'FORCE_COLOR': '1', 'COLUMNS': '100', 'CYBERDROP_QUEUE_LOCKED': '1'})
                 # Drain output independently so cancellation works even if no output arrives.
                 def drain():
-                    for line in iter(self.proc.stdout.readline, b''):
-                        output.info('%s', line.decode('utf-8', errors='replace').rstrip())
+                    decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
+                    for chunk in iter(lambda: self.proc.stdout.read1(8192), b''):
+                        output.info('%s', decoder.decode(chunk))
+                    final = decoder.decode(b'', final=True)
+                    if final:
+                        output.info('%s', final)
                 reader = threading.Thread(target=drain, daemon=True)
                 reader.start()
                 while self.proc.poll() is None:

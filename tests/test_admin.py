@@ -68,7 +68,7 @@ class AdminTests(unittest.TestCase):
 
     def test_worker_runs_without_browser_and_cancels(self):
         ident = self.queue.add('https://example.test/1')
-        with patch.object(self.queue,'command',return_value=[sys.executable,'-u','-c','import time; print("downloading",flush=True); time.sleep(60)']):
+        with patch.object(self.queue,'command',return_value=[sys.executable,'-u','-c','import time; print("downloading",end="\\r",flush=True); time.sleep(60)']):
             worker = threading.Thread(target=self.queue.worker)
             worker.start()
             try:
