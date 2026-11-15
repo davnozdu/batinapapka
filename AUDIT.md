@@ -38,3 +38,26 @@ The supplied test token returned HTTP 200. A live OSHASH lookup returned one rec
 `pip-audit -r requirements.txt -r requirements-admin.txt` found no known vulnerabilities in the resolved application dependencies at audit time. A full local environment audit also identified an outdated development-venv pip (26.1.2); the image/updater upgrades pip before installing Cyberdrop. This is not an OS package security scan.
 
 CI runs the tests and dependency audit before publishing. The combined image additionally starts the actual container, checks HTTP/API/CLI integration and restarts it to verify persistence. Slim image: amd64 + arm64; combined image: amd64. Native browser automation was unavailable in the session, so visual browser QA could not be completed.
+
+## Follow-up 1.2.1
+
+A real existing V9 configuration exposed a startup regression that the initial
+fresh-install smoke test did not cover: Cyberdrop unconditionally scans cwd
+for legacy AppData. The wrapper now resolves input paths before switching to
+a dedicated V10 working directory. Old files are retained; SQLite backup
+copies legacy history only into an absent/empty V10 database. The regression
+is covered by the real Cyberdrop/container checks as well as database tests.
+
+Per-job rotation alone did not bound aggregate log retention, native Cyberdrop
+DEBUG files or cron output. Added a 30-day/200-MiB budget for recognized job
+log files, protected active logs, bounded native CSV diagnostics, redirected
+duplicate native DEBUG logs to `/dev/null`, bounded cron capture, and Docker
+logging limits in all compose files. Only recognized diagnostic paths are
+pruned; URLs, settings, queue/download history and video files are retained.
+The cleanup interval is five seconds, so this is a retention budget rather
+than a hard filesystem quota. User-specified raw SSH logging overrides are
+outside the browser queue's log budget.
+
+31 tests now cover the previous behavior plus retention budgets, age pruning,
+symlink safety, cron rotation and legacy history preservation. The actual V10
+process completed with a legacy V9 settings file present and left it intact.

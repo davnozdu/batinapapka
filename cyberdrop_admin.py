@@ -21,6 +21,7 @@ import tempfile
 from urllib.parse import urlsplit
 import uuid
 
+from log_retention import clean_job_logs
 from metadata_lookup import load_settings
 
 from flask import Flask, abort, jsonify, request, send_from_directory
@@ -38,6 +39,7 @@ class Queue:
         self.db = self.root / 'queue.db'
         self.stop = threading.Event()
         self.proc = None
+        self.last_log_cleanup = 0
         with self.connect() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY, urls TEXT NOT NULL, status TEXT NOT NULL,
@@ -118,7 +120,7 @@ class Queue:
             return None
         path = self.jobs / f'{ident}.log'
         if not path.exists():
-            return ''
+            return '' if self.status(ident) in ('queued','running','cancelling') else 'Журнал отсутствует или удалён по лимиту хранения.'
         with path.open('rb') as stream:
             stream.seek(0, 2)
             stream.seek(max(0, stream.tell() - 48000))
@@ -135,7 +137,9 @@ class Queue:
                 '--config-file', str(self.root / 'config.yaml'),
                 '--database-file', str(self.root / 'cyberdrop.db'),
                 '--cache-file', str(self.root / 'cache.json'),
-                '--logs.folder', str(self.jobs / job['id'])]
+                '--logs.folder', str(self.jobs / job['id']),
+                '--log-file', str(self.jobs / job['id'] / 'managed.log'),
+                '--logs.no-rotate', '--no-dump-json', '--no-dump-responses', '--logs.no-http-traffic']
 
     def terminate(self):
         proc = self.proc
@@ -151,6 +155,13 @@ class Queue:
 
     def run_job(self, job):
         ident = job['id']
+        native_logs = self.jobs / ident
+        native_logs.mkdir(exist_ok=True)
+        # Console output is already captured with rotation; avoid a second,
+        # unbounded native DEBUG log. CSV diagnostics remain available.
+        native_log = native_logs / 'managed.log'
+        if not native_log.exists() and not native_log.is_symlink():
+            native_log.symlink_to('/dev/null')
         (self.jobs / f'{ident}.txt').write_text('\n'.join(json.loads(job['urls'])) + '\n', encoding='utf-8')
         for filename in ('config.yaml', 'cyberdrop.db', 'cache.json'):
             (self.root / filename).touch(exist_ok=True)
@@ -188,6 +199,7 @@ class Queue:
                 reader = threading.Thread(target=drain, daemon=True)
                 reader.start()
                 while self.proc.poll() is None:
+                    self.cleanup_logs()
                     if self.stop.wait(.25) or self.status(ident) == 'cancelling':
                         self.terminate()
                         break
@@ -207,12 +219,26 @@ class Queue:
                 output.removeHandler(handler)
                 handler.close()
 
+    def cleanup_logs(self, force=False):
+        now = time.monotonic()
+        if not force and now - self.last_log_cleanup < 5:
+            return
+        self.last_log_cleanup = now
+        try:
+            with self.connect() as db:
+                active = [row['id'] for row in db.execute("SELECT id FROM jobs WHERE status IN ('running','cancelling')")]
+            clean_job_logs(self.jobs, active)
+        except OSError:
+            LOG.exception('Log retention cleanup failed')
+
     def worker(self):
         # Prevent a second service from replaying active jobs on the same volume.
         with (self.root / '.worker.lock').open('a') as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.recover()
+            self.cleanup_logs(force=True)
             while not self.stop.is_set():
+                self.cleanup_logs()
                 with self.connect() as db:
                     db.execute('BEGIN IMMEDIATE')
                     job = db.execute("SELECT * FROM jobs WHERE status='queued' ORDER BY created LIMIT 1").fetchone()

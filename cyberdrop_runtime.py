@@ -1,10 +1,12 @@
 """Update Cyberdrop in an isolated persistent venv; retain working releases."""
 import fcntl
+from contextlib import closing
 import json
 import logging
 import os
 from pathlib import Path
 import subprocess
+import sqlite3
 import sys
 import time
 import urllib.request
@@ -53,7 +55,7 @@ def update(root):
                     candidate = str(target / 'bin/cyberdrop-dl')
                     run_checked([candidate, '--version'], 30)
                     help_text = subprocess.check_output([candidate, 'download', '--help'], timeout=30, text=True)
-                    for flag in ('--input-file', '--download-folder', '--database-file', '--ui', '--logs.console-level'):
+                    for flag in ('--input-file', '--download-folder', '--database-file', '--ui', '--logs.console-level', '--log-file', '--logs.no-rotate', '--no-dump-json', '--no-dump-responses', '--logs.no-http-traffic'):
                         if flag not in help_text:
                             raise RuntimeError(f'New Cyberdrop version does not support {flag}')
                     link = root / f'.current-{uuid.uuid4().hex}'
@@ -69,9 +71,29 @@ def update(root):
         os.replace(temp, status_path)
 
 
+def preserve_legacy_database(state):
+    legacy = state / 'cyberdrop/AppData/Cache/cyberdrop.db'
+    current = state / 'cyberdrop/cyberdrop.db'
+    if not legacy.is_file() or legacy.stat().st_size == 0 or (current.exists() and current.stat().st_size):
+        return
+    # SQLite backup preserves committed WAL data too; never move/delete legacy state.
+    from urllib.parse import quote
+    temp = current.with_name('.legacy-db-' + uuid.uuid4().hex)
+    try:
+        with closing(sqlite3.connect('file:' + quote(str(legacy)) + '?mode=ro', uri=True)) as source:
+            with closing(sqlite3.connect(temp)) as dest:
+                source.backup(dest)
+        os.replace(temp, current)
+        LOG.info('Copied legacy Cyberdrop history into V10; original database retained')
+    except (OSError, sqlite3.Error):
+        LOG.exception('Legacy history copy failed; original database retained')
+    finally:
+        temp.unlink(missing_ok=True)
+
+
 def main():
     logging.basicConfig(level=logging.INFO)
-    state = Path(os.environ.get('STATE_DIR', '/state'))
+    state = Path(os.environ.get('STATE_DIR', '/state')).resolve()
     root = state / 'cyberdrop' / 'runtime'
     # Also serialize manual SSH downloads with the web worker and renamer.
     lock = None
@@ -79,13 +101,32 @@ def main():
         lock = (state / '.batinapapka.lock').open('a')
         fcntl.flock(lock, fcntl.LOCK_EX)
         os.set_inheritable(lock.fileno(), True)
+    # V10 scans cwd/AppData even with an explicit --config-file. Never start
+    # inside the persistent legacy AppData tree or an SSH home that links to it.
+    work = state / 'cyberdrop' / 'work-v10'
+    work.mkdir(parents=True, exist_ok=True)
+    args = sys.argv[1:]
+    # Resolve user paths before changing cwd; queue paths are already absolute.
+    path_flags = {'--input-file','--input','-i','--input-folder','--config-file','--config','-c',
+                  '--database-file','--db','--cache-file','--download-folder','--output','-o','-d',
+                  '--cookies','--logs.folder','--log-file','--logs.files.main'}
+    for index, arg in enumerate(args):
+        name, separator, value = arg.partition('=')
+        if name in path_flags:
+            if separator:
+                args[index] = name + '=' + os.path.abspath(os.path.expanduser(value))
+            elif index + 1 < len(args):
+                args[index+1] = os.path.abspath(os.path.expanduser(args[index+1]))
+        elif arg.lower().endswith(('.txt','.html')) and not arg.startswith(('http://','https://')):
+            args[index] = os.path.abspath(os.path.expanduser(arg))
+    preserve_legacy_database(state)
+    os.chdir(work)
     # V10 also uses XDG paths; persist them for interactive SSH sessions.
     for key, folder in [('XDG_CONFIG_HOME', 'config'), ('XDG_DATA_HOME', 'data'), ('XDG_CACHE_HOME', 'cache'), ('XDG_STATE_HOME', 'state')]:
         os.environ[key] = str(state / 'cyberdrop' / ('xdg-' + folder))
     update(root)
-    if sys.argv[1:] == ['--update-only']:
+    if args == ['--update-only']:
         return 0
-    args = sys.argv[1:]
     if args and args[0] == 'download':
         defaults = [('--config-file', '--config', '-c', str(state / 'cyberdrop/config.yaml')),
                     ('--database-file', '--db', str(state / 'cyberdrop/cyberdrop.db')),

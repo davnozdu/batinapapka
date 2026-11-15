@@ -29,7 +29,7 @@ def main():
     os.chown(runner, account.pw_uid, account.pw_gid)
     # Cron invokes a fixed command. The script holds arguments/environment safely.
     Path('/usr/local/bin/run-scheduled-renamer').write_text(
-        '#!/bin/sh\nexec ' + shlex.quote(str(runner)) + ' >> ' + shlex.quote(str(state / 'cron.log')) + ' 2>&1\n')
+        '#!/bin/sh\nexport STATE_DIR=' + shlex.quote(str(state)) + '\nexec /usr/local/bin/python /app/run_scheduled.py\n')
     Path('/usr/local/bin/run-scheduled-renamer').chmod(0o755)
     target.write_text(f'{schedule} {user} /usr/local/bin/run-scheduled-renamer\n')
     target.chmod(0o644)

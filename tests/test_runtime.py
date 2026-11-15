@@ -1,4 +1,5 @@
 import json
+from contextlib import closing
 import os
 from pathlib import Path
 import tempfile
@@ -22,7 +23,7 @@ class UpdateTests(unittest.TestCase):
                     binary.parent.mkdir(parents=True)
                     binary.touch()
                 self.assertFalse((root/'current').exists())
-            with patch.dict(os.environ,{'CYBERDROP_AUTO_UPDATE':'1'}), patch.object(runtime.urllib.request,'urlopen',return_value=response), patch.object(runtime.subprocess,'check_output',side_effect=['10.15.3','--input-file --download-folder --database-file --ui --logs.console-level']),patch.object(runtime,'run_checked',side_effect=create_venv):
+            with patch.dict(os.environ,{'CYBERDROP_AUTO_UPDATE':'1'}), patch.object(runtime.urllib.request,'urlopen',return_value=response), patch.object(runtime.subprocess,'check_output',side_effect=['10.15.3','--input-file --download-folder --database-file --ui --logs.console-level --log-file --logs.no-rotate --no-dump-json --no-dump-responses --logs.no-http-traffic']),patch.object(runtime,'run_checked',side_effect=create_venv):
                 runtime.update(root)
             self.assertTrue((root/'current/bin/cyberdrop-dl').exists())
             self.assertEqual(json.loads((root/'status.json').read_text())['version'],'10.16.0')
@@ -47,3 +48,21 @@ class UpdateTests(unittest.TestCase):
             with patch.object(runtime.urllib.request,'urlopen') as fetch:
                 runtime.update(root)
                 fetch.assert_not_called()
+
+    def test_legacy_database_is_copied_and_never_overwrites_current(self):
+        import sqlite3
+        with tempfile.TemporaryDirectory() as temp:
+            state=Path(temp)
+            legacy=state/'cyberdrop/AppData/Cache/cyberdrop.db';legacy.parent.mkdir(parents=True)
+            with closing(sqlite3.connect(legacy)) as db, db:
+                db.execute('CREATE TABLE history (name TEXT)')
+                db.execute("INSERT INTO history VALUES ('downloaded')")
+            runtime.preserve_legacy_database(state)
+            current=state/'cyberdrop/cyberdrop.db'
+            with closing(sqlite3.connect(current)) as db, db:
+                self.assertEqual(db.execute('SELECT name FROM history').fetchone()[0],'downloaded')
+                db.execute("INSERT INTO history VALUES ('new')")
+            runtime.preserve_legacy_database(state)
+            with closing(sqlite3.connect(current)) as db, db:
+                self.assertEqual(db.execute('SELECT count(*) FROM history').fetchone()[0],2)
+            self.assertTrue(legacy.exists())

@@ -16,6 +16,11 @@ services:
     pull_policy: always
     container_name: batinapapka_cyberdrop
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
     environment:
       TPDB_API_KEY: ${TPDB_API_KEY:-}

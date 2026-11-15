@@ -330,3 +330,25 @@ Fork, branch, PR. Style: standard library + `requests`/`rapidfuzz`/`Unidecode`; 
 ## License
 
 MIT — see `LICENSE`.
+
+## Log retention and V9 compatibility (v1.2.1+)
+
+- Job output rotates at 5 MB with one backup (about 10 MB per job).
+- Managed job logs are cleaned after 30 days and have a combined 200 MiB
+  budget. Cleanup runs every 5 seconds; active job output is protected and
+  remains bounded by its own rotation. Native diagnostic CSV files are trimmed
+  to 1 MiB while active. Limits can be briefly exceeded between cleanup passes.
+- Duplicate native Cyberdrop DEBUG output is discarded for browser jobs; the
+  rotating browser log retains INFO output, progress, errors and final stats.
+- Cron output rotates at 5 MiB with two backups (15 MiB). The renamer's own
+  log remains 10 MiB with seven backups (80 MiB).
+- Compose configures Docker output rotation at 10 MB with three files. Update
+  the compose file to apply this host-side setting to an existing installation.
+
+Cyberdrop V10 checks for `AppData` in the current working directory, even with
+an explicit V10 config. The wrapper now starts from a dedicated `work-v10`
+directory so a preserved V9 configuration cannot block startup. Old settings
+are retained and are not automatically converted to the incompatible V10
+schema. A legacy SQLite history is backed up into the V10 location only when
+the new database is absent/empty; an existing V10 database is never replaced.
+After updating, use **Повторить** on a job that failed with `Migration Error`.

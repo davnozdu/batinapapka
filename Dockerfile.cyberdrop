@@ -31,7 +31,7 @@ RUN python3 -m venv /opt/cyberdrop/venv \
  && /opt/cyberdrop/venv/bin/pip install --no-cache-dir cyberdrop-dl-patched==${CYBERDROP_VERSION}
 
 
-COPY batinapapka.py metadata_lookup.py cyberdrop_admin.py cyberdrop_runtime.py configure_cron.py ./
+COPY batinapapka.py metadata_lookup.py log_retention.py run_scheduled.py cyberdrop_admin.py cyberdrop_runtime.py configure_cron.py ./
 COPY web ./web
 RUN printf '%s\n' '#!/bin/sh' 'exec /usr/local/bin/python /app/cyberdrop_runtime.py "$@"' > /usr/local/bin/cyberdrop-dl \
  && chmod +x /usr/local/bin/cyberdrop-dl

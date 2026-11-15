@@ -35,6 +35,10 @@ try:
         raise AssertionError('Web service did not start')
     assert b'Cyberdrop' in request('/')
     identity = docker('exec', container, 'cat', '/state/ssh/ssh_host_ed25519_key.pub')
+    # Reproduce an existing V9 installation: V10 used to fail despite an explicit config.
+    docker('exec', '-u', 'smoke', container, 'python', '-c',
+           "from pathlib import Path; p=Path('/state/cyberdrop/AppData/Configs/Default/settings.yaml'); "
+           "p.parent.mkdir(parents=True,exist_ok=True); p.write_text('legacy_v9: true\\n')")
     ident=json.loads(request('/api/jobs',b'urls=https%3A%2F%2Fexample.invalid%2Fsmoke'))['id']
     for _ in range(120):
         job=json.loads(request('/api/jobs'))[0]
@@ -45,8 +49,11 @@ try:
         raise AssertionError('Actual Cyberdrop process did not finish')
     log=json.loads(request(f'/api/jobs/{ident}/log'))['log']
     print(log[-12000:])
+    assert 'Migration Error' not in log and job['status'] == 'done', log
     assert 'Unknown option' not in log and 'No such option' not in log and 'Traceback' not in log, log
     assert 'Cyberdrop' in log or 'cyberdrop' in log, log
+    assert docker('exec',container,'cat','/state/cyberdrop/AppData/Configs/Default/settings.yaml').startswith('legacy_v9')
+    assert docker('exec',container,'readlink',f'/state/cyberdrop/jobs/{ident}/managed.log') == '/dev/null'
     docker('restart',container)
     port = docker('port', container, '8080/tcp').split(':')[-1]
     base = 'http://127.0.0.1:' + port
