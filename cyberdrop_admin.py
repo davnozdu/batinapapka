@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -23,6 +24,7 @@ import uuid
 
 from log_retention import clean_job_logs
 from metadata_lookup import load_settings
+import telegram_bot
 
 from flask import Flask, abort, jsonify, request, send_from_directory
 
@@ -48,6 +50,12 @@ class Queue:
             columns = [r['name'] for r in db.execute('PRAGMA table_info(jobs)')]
             if 'kind' not in columns:
                 db.execute("ALTER TABLE jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'download'")
+            for name, definition in [('telegram_chat_id','TEXT'), ('telegram_update_key','TEXT'),
+                                     ('telegram_notified','INTEGER NOT NULL DEFAULT 0')]:
+                if name not in columns:
+                    db.execute(f'ALTER TABLE jobs ADD COLUMN {name} {definition}')
+            db.execute('CREATE UNIQUE INDEX IF NOT EXISTS telegram_update_key ON jobs(telegram_update_key)')
+            db.execute('CREATE TABLE IF NOT EXISTS telegram_state (key TEXT PRIMARY KEY, value TEXT)')
 
     @contextmanager
     def connect(self):
@@ -63,8 +71,9 @@ class Queue:
         with self.connect() as db:
             db.execute("UPDATE jobs SET status='queued', started=NULL WHERE status='running'")
             db.execute("UPDATE jobs SET status='cancelled', finished=? WHERE status='cancelling'", (time.time(),))
+            db.execute("UPDATE jobs SET status='paused', finished=? WHERE status='pausing'", (time.time(),))
 
-    def add(self, text):
+    def add(self, text, telegram_chat_id=None, telegram_update_key=None):
         urls = []
         for line in text.splitlines():
             line = line.strip()
@@ -83,8 +92,18 @@ class Queue:
             raise ValueError('Добавьте от 1 до 1000 ссылок.')
         ident = uuid.uuid4().hex
         with self.connect() as db:
-            db.execute('INSERT INTO jobs(id,urls,status,created) VALUES(?,?,?,?)',
-                       (ident, json.dumps(urls), 'queued', time.time()))
+            db.execute('BEGIN IMMEDIATE')
+            if telegram_update_key:
+                receipt = db.execute('SELECT value FROM telegram_state WHERE key=?', ('receipt:'+telegram_update_key,)).fetchone()
+                if receipt:
+                    return receipt['value']
+                existing = db.execute('SELECT id FROM jobs WHERE telegram_update_key=?', (telegram_update_key,)).fetchone()
+                if existing:
+                    return existing['id']
+            db.execute('INSERT INTO jobs(id,urls,status,created,telegram_chat_id,telegram_update_key) VALUES(?,?,?,?,?,?)',
+                       (ident, json.dumps(urls), 'queued', time.time(), telegram_chat_id, telegram_update_key))
+            if telegram_update_key:
+                db.execute('INSERT INTO telegram_state(key,value) VALUES(?,?)',('receipt:'+telegram_update_key,ident))
         return ident
 
     def add_renamer(self):
@@ -97,16 +116,44 @@ class Queue:
     def list(self):
         with self.connect() as db:
             return [dict(r) | {'urls': json.loads(r['urls'])} for r in db.execute(
-                'SELECT * FROM jobs ORDER BY created DESC LIMIT 200')]
+                """SELECT * FROM jobs ORDER BY CASE WHEN status IN ('running','cancelling','pausing') THEN 0
+                WHEN status='queued' THEN 1 WHEN status='paused' THEN 2 ELSE 3 END,
+                CASE WHEN status='queued' THEN created END ASC, created DESC LIMIT 200""")]
+
+    def delete(self, ident):
+        if not re.fullmatch('[0-9a-f]{32}', ident):
+            raise ValueError('Задание не найдено.')
+        # Serialize against claiming queued jobs and retry/cancel requests.
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT status FROM jobs WHERE id=?', (ident,)).fetchone()
+            if not row:
+                raise ValueError('Задание не найдено.')
+            if row['status'] not in ('queued','done','failed','cancelled','paused'):
+                raise ValueError('Сначала отмените задание и дождитесь остановки процесса.')
+            for suffix in ('.txt', '.log', '.log.1'):
+                (self.jobs / (ident + suffix)).unlink(missing_ok=True)
+            diagnostics = self.jobs / ident
+            if diagnostics.is_symlink():
+                diagnostics.unlink()
+            elif diagnostics.exists():
+                shutil.rmtree(diagnostics)
+            db.execute('DELETE FROM jobs WHERE id=?', (ident,))
 
     def action(self, ident, action):
         with self.connect() as db:
             if action == 'cancel':
                 result = db.execute("""UPDATE jobs SET status=CASE WHEN status='running'
-                    THEN 'cancelling' ELSE 'cancelled' END WHERE id=? AND status IN ('running','queued')""", (ident,))
+                    THEN 'cancelling' WHEN status='pausing' THEN 'cancelling' ELSE 'cancelled' END WHERE id=? AND status IN ('running','queued','paused','pausing')""", (ident,))
+            elif action == 'pause':
+                result = db.execute("""UPDATE jobs SET status=CASE WHEN status='running' THEN 'pausing' ELSE 'paused' END
+                    WHERE id=? AND status IN ('queued','running')""", (ident,))
+            elif action == 'resume':
+                result = db.execute("""UPDATE jobs SET status='queued',started=NULL,finished=NULL,exit_code=NULL,telegram_notified=0
+                    WHERE id=? AND status IN ('cancelled','failed','paused')""", (ident,))
             else:
-                result = db.execute("""UPDATE jobs SET status='queued',started=NULL,finished=NULL,exit_code=NULL
-                    WHERE id=? AND status IN ('cancelled','failed','done')""", (ident,))
+                result = db.execute("""UPDATE jobs SET status='queued',started=NULL,finished=NULL,exit_code=NULL,telegram_notified=0
+                    WHERE id=? AND status IN ('cancelled','failed','done','paused')""", (ident,))
             if not result.rowcount:
                 raise ValueError('Задание не найдено или его статус уже изменился.')
 
@@ -169,14 +216,14 @@ class Queue:
         context = (self.state / '.batinapapka.lock').open('a') if job['kind'] == 'download' else nullcontext()
         with context as lock:
             while lock is not None and not self.stop.is_set():
-                if self.status(ident) == 'cancelling':
+                if self.status(ident) in ('cancelling','pausing'):
                     break
                 try:
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
                     self.stop.wait(.5)
-            if self.stop.is_set() or self.status(ident) == 'cancelling':
+            if self.stop.is_set() or self.status(ident) in ('cancelling','pausing'):
                 return
             handler = RotatingFileHandler(self.jobs / f'{ident}.log', maxBytes=5_000_000, backupCount=1)
             output = logging.getLogger(f'job.{ident}')
@@ -200,14 +247,14 @@ class Queue:
                 reader.start()
                 while self.proc.poll() is None:
                     self.cleanup_logs()
-                    if self.stop.wait(.25) or self.status(ident) == 'cancelling':
+                    if self.stop.wait(.25) or self.status(ident) in ('cancelling','pausing'):
                         self.terminate()
                         break
                 reader.join(timeout=5)
                 code = self.proc.wait()
                 with self.connect() as db:
                     status = self.status(ident)
-                    final = 'cancelled' if status == 'cancelling' else ('queued' if self.stop.is_set() else ('done' if code == 0 else 'failed'))
+                    final = 'paused' if status == 'pausing' else ('cancelled' if status == 'cancelling' else ('queued' if self.stop.is_set() else ('done' if code == 0 else 'failed')))
                     db.execute('UPDATE jobs SET status=?,finished=?,exit_code=? WHERE id=?',
                                (final, time.time(), code, ident))
                 output.info('Process exited: %s; status: %s', code, final)
@@ -226,7 +273,7 @@ class Queue:
         self.last_log_cleanup = now
         try:
             with self.connect() as db:
-                active = [row['id'] for row in db.execute("SELECT id FROM jobs WHERE status IN ('running','cancelling')")]
+                active = [row['id'] for row in db.execute("SELECT id FROM jobs WHERE status IN ('running','cancelling','pausing')")]
             clean_job_logs(self.jobs, active)
         except OSError:
             LOG.exception('Log retention cleanup failed')
@@ -256,6 +303,7 @@ class Queue:
                 finally:
                     with self.connect() as db:
                         db.execute("UPDATE jobs SET status='cancelled',finished=? WHERE id=? AND status='cancelling'", (time.time(), job['id']))
+                        db.execute("UPDATE jobs SET status='paused',finished=? WHERE id=? AND status='pausing'", (time.time(), job['id']))
                         db.execute("UPDATE jobs SET status='queued' WHERE id=? AND status='running'", (job['id'],))
 
 
@@ -317,13 +365,20 @@ def create_app(queue, username, password):
 
     @app.post('/api/jobs/<ident>/<action>')
     def action(ident, action):
-        if action not in ('cancel', 'retry'):
+        if action not in ('cancel', 'retry', 'delete', 'pause', 'resume'):
             abort(404)
         try:
-            queue.action(ident, action)
+            if action == 'delete':
+                queue.delete(ident)
+            else:
+                queue.action(ident, action)
             return jsonify(ok=True)
         except ValueError as exc:
             return jsonify(error=str(exc)), 409
+
+        except OSError:
+            LOG.exception('Job cleanup failed')
+            return jsonify(error='Не удалось удалить файлы журнала. Попробуйте ещё раз.'), 500
 
     @app.get('/api/jobs/<ident>/log')
     def log(ident):
@@ -358,6 +413,17 @@ def create_app(queue, username, password):
         os.replace(temp, path)
         return jsonify(enabled=config['enabled'], configured=bool(config['tpdb_api_key']))
 
+    @app.get('/api/telegram')
+    def telegram_settings():
+        return jsonify(telegram_bot.public_settings(telegram_bot.load_settings(queue.state)))
+
+    @app.post('/api/telegram')
+    def save_telegram_settings():
+        try:
+            return jsonify(telegram_bot.save_settings(queue.state,request.get_json(silent=True)))
+        except ValueError as exc:
+            return jsonify(error=str(exc)), 400
+
     @app.get('/api/runtime')
     def runtime():
         path = queue.root / 'runtime' / 'status.json'
@@ -387,6 +453,9 @@ def main():
             server.close()
     worker = threading.Thread(target=run_worker, daemon=True)
     worker.start()
+    bot = telegram_bot.TelegramBot(queue)
+    bot_thread = threading.Thread(target=bot.run, daemon=True)
+    bot_thread.start()
     def shutdown(*_):
         queue.stop.set()
         server.close()
@@ -400,6 +469,7 @@ def main():
     finally:
         queue.stop.set()
         worker.join(timeout=25)
+        bot_thread.join(timeout=20)
     if failed.is_set():
         raise RuntimeError("Queue worker failed")
 

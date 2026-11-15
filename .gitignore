@@ -19,3 +19,9 @@ search_cache.json.gz
 .idea/
 .vscode/
 .DS_Store
+
+# Browser-managed secrets for bare-metal runs
+telegram-settings.json
+metadata-settings.json
+.telegram-*
+.metadata-settings-*

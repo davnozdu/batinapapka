@@ -61,3 +61,27 @@ outside the browser queue's log budget.
 31 tests now cover the previous behavior plus retention budgets, age pruning,
 symlink safety, cron rotation and legacy history preservation. The actual V10
 process completed with a legacy V9 settings file present and left it intact.
+
+## Follow-up 1.3.0
+
+Added browser deletion of inactive jobs and their own artifacts, with an
+atomic SQLite status check against worker claiming/retry and path validation.
+Video files, configuration and Cyberdrop's history database are never deleted.
+Added pause/resume and persistent recovery tests using real subprocesses and
+partial-file fixtures. Running jobs are recovered automatically after image
+replacement; explicit pauses/cancellations remain under user control.
+
+Added a Telegram adapter using the same queue. Private sender IDs and chat IDs
+must match an explicit allowlist, including callback authorization. Token and
+allowlist are configurable in the authenticated browser, secrets are mode
+0600 and never exposed by GET APIs, and request exceptions are sanitized to
+avoid logging the token embedded in Telegram API URLs. Menu and inline buttons
+cover queue/status/pause/resume/cancel/log operations. No per-file messages are
+emitted: notification state is persisted per terminal job. Telegram update
+offsets and pending-link receipts prevent duplicate job creation on replay.
+
+44 tests cover queue controls, deletion/data preservation, process resumption,
+Telegram authorization, settings, button callbacks, replay protection and
+whole-job notifications/retry. A live getMe request verified the supplied bot
+token; the user opted to enter runtime configuration themselves, so no bot
+was activated and no live Telegram messages were sent during development.

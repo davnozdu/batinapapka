@@ -34,6 +34,7 @@ try:
     else:
         raise AssertionError('Web service did not start')
     assert b'Cyberdrop' in request('/')
+    assert json.loads(request('/api/telegram')) == {'enabled':False,'configured':False,'allowed_user_ids':[]}
     identity = docker('exec', container, 'cat', '/state/ssh/ssh_host_ed25519_key.pub')
     # Reproduce an existing V9 installation: V10 used to fail despite an explicit config.
     docker('exec', '-u', 'smoke', container, 'python', '-c',
@@ -66,7 +67,10 @@ try:
     else:
         raise AssertionError('Queue did not survive container restart')
     assert docker('exec', container, 'cat', '/state/ssh/ssh_host_ed25519_key.pub') == identity
-    print('Container HTTP, SSH setup, actual Cyberdrop CLI and persistence smoke checks passed')
+    assert json.loads(request(f'/api/jobs/{ident}/delete',b''))['ok']
+    assert json.loads(request('/api/jobs')) == []
+    assert docker('exec',container,'python','-c',f"from pathlib import Path; print(any(Path('/state/cyberdrop/jobs').glob('{ident}*')))") == 'False'
+    print('Container HTTP, SSH setup, actual Cyberdrop CLI, persistence and deletion checks passed')
 finally:
     print(docker('logs',container))
     docker('rm','-f',container)

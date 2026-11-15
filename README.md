@@ -352,3 +352,52 @@ are retained and are not automatically converted to the incompatible V10
 schema. A legacy SQLite history is backed up into the V10 location only when
 the new database is absent/empty; an existing V10 database is never replaced.
 After updating, use **Повторить** on a job that failed with `Migration Error`.
+
+## Queue controls and Telegram bot (v1.3.0+)
+
+The browser has **Удалить** for queued, paused and terminal jobs. Deletion
+removes that job's row, submitted URL list and diagnostic logs; downloaded
+videos and Cyberdrop's download-history database are preserved. Running jobs
+must be paused/cancelled and stopped first. Active jobs stay at the top of the
+list even when there is a long history.
+
+**Пауза** stops the current process while retaining the job, database and
+partial files. **Продолжить** resumes a paused, cancelled or failed job under
+the same ID. During an image update/restart, unfinished running jobs return to
+the queue automatically. Explicitly paused/cancelled jobs wait for the user to
+continue them. Byte-level resumption depends on the source host and Cyberdrop;
+files already in its completed history are normally skipped.
+
+To enable the bot, open **Telegram-бот** in the browser settings, enter the
+BotFather token and your numeric user ID, enable it and save. Blank token input
+preserves the existing token. Settings apply without restarting the container.
+The token is stored in `/state/telegram-settings.json` with mode 0600 and is
+never returned by the settings API. No token or personal ID is baked into the
+image. The `.env` alternatives are `TELEGRAM_BOT_TOKEN` and
+`TELEGRAM_ALLOWED_USER_IDS` (comma-separated).
+
+The bot speaks **only to allowed users in private chats**. Empty allowlists
+cannot enable the bot; other users and groups are ignored, including button
+callbacks. The bottom menu contains **Скачать**, **Активное задание**,
+**Очередь**, **Пауза**, **Продолжить**, **Отменить**, **Помощь**. Individual jobs
+also have buttons, so command names and job IDs do not need to be memorized.
+
+Send a link (or several links on separate lines) to enqueue one job. The bot
+acknowledges it and sends a final message when the entire job ends, with its
+result and final Cyberdrop output; it never sends per-file notifications.
+Failures/cancellations are labelled accordingly and provide a resume button.
+The active view shows the latest Cyberdrop output, including the current file
+when Cyberdrop reports it. Browser-submitted jobs are visible to the permitted
+bot administrators as well. Text commands remain available: `/start`, `/id`,
+`/active`, `/status`, `/queue`, `/pause ID`, `/resume ID`, `/cancel ID`.
+
+Polling offsets, job origin and notification acknowledgements persist in the
+queue database. Replayed Telegram link updates do not create duplicate jobs,
+even around restarts. A notification whose delivery fails is retried after
+reconnection. A rare crash/network ambiguity between Telegram accepting a
+message and the local acknowledgement can cause a repeated final message;
+there are no periodic or per-file notification streams.
+
+This uses Telegram long polling and needs outbound HTTPS, not a published
+webhook port. Use one running instance with a given token, with no active
+webhook for that bot. API outages never stop the local download queue.
