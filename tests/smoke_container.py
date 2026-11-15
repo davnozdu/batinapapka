@@ -12,6 +12,7 @@ def docker(*args):
 
 
 container = docker('run', '-d', '-e', 'ADMIN_USER=smoke', '-e', 'ADMIN_PASSWORD=smoke-test-password',
+                   '-e', 'SHELL_USER=smoke', '-e', 'SHELL_PASSWORD=smoke-test-password',
                    '-e', 'CRON_SCHEDULE=', '-e', 'CYBERDROP_AUTO_UPDATE=0',
                    '-p', '127.0.0.1::8080', 'batinapapka-cyberdrop:smoke')
 try:
@@ -33,6 +34,7 @@ try:
     else:
         raise AssertionError('Web service did not start')
     assert b'Cyberdrop' in request('/')
+    identity = docker('exec', container, 'cat', '/state/ssh/ssh_host_ed25519_key.pub')
     ident=json.loads(request('/api/jobs',b'urls=https%3A%2F%2Fexample.invalid%2Fsmoke'))['id']
     for _ in range(120):
         job=json.loads(request('/api/jobs'))[0]
@@ -56,7 +58,8 @@ try:
             time.sleep(1)
     else:
         raise AssertionError('Queue did not survive container restart')
-    print('Container HTTP, actual Cyberdrop CLI and persistence smoke checks passed')
+    assert docker('exec', container, 'cat', '/state/ssh/ssh_host_ed25519_key.pub') == identity
+    print('Container HTTP, SSH setup, actual Cyberdrop CLI and persistence smoke checks passed')
 finally:
     print(docker('logs',container))
     docker('rm','-f',container)
