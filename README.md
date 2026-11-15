@@ -14,7 +14,7 @@
 
 ## Install (bare metal)
 
-Requires Python 3.10+.
+Requires Python 3.11+ (3.12+ for the Cyberdrop image).
 
 ```bash
 git clone https://github.com/davnozdu/batinapapka.git
@@ -224,6 +224,67 @@ This image is amd64-only (some `cyberdrop-dl-patched` transitive deps have no pr
 | `~/URLs.txt` → `/state/cyberdrop/URLs.txt` | `batinapapka_state` named volume |
 
 So `cyberdrop-dl` keeps its config (`AppData/Configs/Default/settings.yaml`), its cache DB (`AppData/Cache/cyberdrop.db`) and your `URLs.txt` between container recreates. The first run after a fresh install adopts any real files the user already wrote into `~/AppData` / `~/URLs.txt` before the symlinks existed and moves them into `/state/cyberdrop/` once.
+
+## Browser administration (Cyberdrop image, v1.2.0+)
+
+Open **http://localhost:8080** on the Docker host. The login defaults to
+`SHELL_USER` / `SHELL_PASSWORD`; set `ADMIN_USER` and `ADMIN_PASSWORD` to use
+separate browser credentials. No Brave key is needed for downloads; without
+it the automatic renamer is disabled.
+
+The page supports:
+
+- One or many HTTP/HTTPS links, one per line.
+- Uploading a UTF-8 `.txt` file with links (up to 1 MiB, 1000 links per job).
+- Persistent queue/history, a live Cyberdrop output log, cancel and retry.
+
+You can close the browser or SSH terminal: queued/browser-managed downloads
+continue in the container. Reopening the page restores their status. If the
+container restarts, unfinished jobs are requeued and Cyberdrop uses its history
+and partial files to resume where the source host permits. Cancellation stops
+the download process and its children, retains partial files and never deletes
+finished downloads. A zero exit code means the process finished; check the log
+for unsupported URLs or individual download errors.
+
+The port binds to loopback by default. For remote access:
+
+```bash
+ssh -L 8080:127.0.0.1:8080 user@docker-host
+# Then open http://localhost:8080 on your computer.
+```
+
+Alternatively set `ADMIN_BIND_IP` to the host's private LAN/VPN IP in `.env`.
+Use an HTTPS reverse proxy if exposing the UI beyond a trusted connection.
+`ADMIN_PORT` changes the published host port. Existing deployments must update
+the compose file as well as pulling the image to publish the new port.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/davnozdu/batinapapka/main/batinapapka_cyberdrop-dl.yaml -o docker-compose.new.yml
+# Copy the new environment/ports/stop_grace_period settings into your existing
+# compose file, preserving your volume mounts and existing state volume name.
+docker compose pull
+docker compose up -d
+```
+
+Cyberdrop updates automatically **before starting a download or SSH CLI**, at
+most once per `CYBERDROP_UPDATE_INTERVAL` seconds (default 86400). It builds
+and verifies a separate venv before switching; a failed update retains the
+working version. Set `CYBERDROP_AUTO_UPDATE=0` to disable. To check immediately,
+remove `/state/cyberdrop/runtime/status.json` and run `cyberdrop-dl --update-only`.
+Updates never replace a running download. The bundled baseline is 10.15.3.
+
+The queue and current V10 config/database/cache/logs live in
+`/state/cyberdrop/`; downloads go into `/videos`. V10 uses
+`/state/cyberdrop/config.yaml`; legacy AppData remains preserved for migration.
+SSH remains available, including `cyberdrop-dl download URL` and `batinapapka`.
+Use the browser to manage a download if you want browser cancellation/history;
+manual SSH CLI processes are separate from the web queue.
+
+The renamer skips files modified in the last 60 seconds and waits for managed
+downloads to release their shared lock. Run it again after downloads finish if
+a scheduled run was skipped. The renamer uses atomic hard links for safe
+renaming, so the video filesystem must support hard links. See [AUDIT.md](AUDIT.md)
+for findings, validation and limits.
 
 ## Example
 

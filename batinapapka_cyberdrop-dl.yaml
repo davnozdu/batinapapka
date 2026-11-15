@@ -18,12 +18,19 @@ services:
     restart: unless-stopped
 
     environment:
-      BRAVE_API_KEY: ${BRAVE_API_KEY:?set BRAVE_API_KEY in .env or shell}
-      CRON_SCHEDULE: "0 3 * * *"
+      BRAVE_API_KEY: ${BRAVE_API_KEY:-}
+      CRON_SCHEDULE: "${CRON_SCHEDULE-0 3 * * *}"
       SHELL_USER: ${SHELL_USER:?set SHELL_USER in .env or shell}
+      ADMIN_USER: ${ADMIN_USER:-${SHELL_USER}}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-${SHELL_PASSWORD}}
+      CYBERDROP_AUTO_UPDATE: ${CYBERDROP_AUTO_UPDATE:-1}
+      CYBERDROP_UPDATE_INTERVAL: ${CYBERDROP_UPDATE_INTERVAL:-86400}
       SHELL_PASSWORD: ${SHELL_PASSWORD:?set SHELL_PASSWORD in .env or shell}
 
+    stop_grace_period: 40s
+
     ports:
+      - "${ADMIN_BIND_IP:-127.0.0.1}:${ADMIN_PORT:-8080}:8080"
       - "2222:22"     # ssh -p 2222 <SHELL_USER>@host
 
     volumes:

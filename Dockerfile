@@ -18,7 +18,7 @@ WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY batinapapka.py ./
+COPY batinapapka.py configure_cron.py ./
 COPY entrypoint.sh /usr/local/bin/batinapapka-entrypoint
 RUN chmod +x /usr/local/bin/batinapapka-entrypoint \
  && printf '%s\n' \
@@ -26,7 +26,7 @@ RUN chmod +x /usr/local/bin/batinapapka-entrypoint \
         '# cd into /state so file_renamer.log and search_cache.json.gz' \
         '# always land on the persistent volume, no matter where the' \
         '# caller was when they ran this.' \
-        'cd /state' \
+        'cd "${STATE_DIR:-/state}" || exit 1' \
         'exec /usr/local/bin/python /app/batinapapka.py "$@"' \
     > /usr/local/bin/batinapapka \
  && chmod +x /usr/local/bin/batinapapka

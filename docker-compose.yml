@@ -15,7 +15,7 @@ services:
 
     environment:
       BRAVE_API_KEY: ${BRAVE_API_KEY:?set BRAVE_API_KEY in .env or shell}
-      CRON_SCHEDULE: "0 3 * * *"
+      CRON_SCHEDULE: "${CRON_SCHEDULE-0 3 * * *}"
 
     volumes:
       # Mount any number of host folders here. The image's default command

@@ -15,7 +15,22 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install -r requirements.txt -r requirements-admin.txt pip-audit
+      - run: python -W error::ResourceWarning -m unittest discover -s tests -v
+      - run: sh -n entrypoint.sh entrypoint-cyberdrop.sh
+      - run: pip-audit -r requirements.txt -r requirements-admin.txt
+
   build:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -46,6 +61,22 @@ jobs:
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
+
+      - name: Build Cyberdrop smoke image
+        if: matrix.name == 'batinapapka-cyberdrop'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.cyberdrop
+          platforms: linux/amd64
+          load: true
+          tags: batinapapka-cyberdrop:smoke
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,scope=${{ matrix.name }},mode=max
+
+      - name: Verify web queue and Cyberdrop in the built image
+        if: matrix.name == 'batinapapka-cyberdrop'
+        run: python3 tests/smoke_container.py
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'

@@ -19,6 +19,7 @@ import shutil
 import subprocess
 import sys
 import time
+import tempfile
 import unicodedata
 from dataclasses import asdict, dataclass
 from datetime import datetime
@@ -206,6 +207,8 @@ class CompressedCache:
                 raise ValueError("cache root is not a dict")
             self.cache = data.get("cache", {})
             self.timestamps = data.get("timestamps", {})
+            if not isinstance(self.cache, dict) or not isinstance(self.timestamps, dict):
+                raise ValueError("invalid cache structure")
             self._cleanup_expired()
         except (OSError, ValueError, json.JSONDecodeError) as e:
             logger.error("Corrupt cache (%s) — starting fresh", e)
@@ -234,17 +237,24 @@ class CompressedCache:
         now = datetime.now()
         expired = [
             k for k, ts in self.timestamps.items()
-            if (now - datetime.fromisoformat(ts)).days > self.ttl_days
+            if not isinstance(ts, str) or self._expired(ts, now)
         ]
         for k in expired:
             self.cache.pop(k, None)
             self.timestamps.pop(k, None)
 
+    def _expired(self, ts: str, now: datetime) -> bool:
+        try:
+            value = datetime.fromisoformat(ts)
+            return (now - value).days > self.ttl_days
+        except (ValueError, TypeError):
+            return True
+
     def get(self, key: str) -> Optional[Any]:
         ts = self.timestamps.get(key)
         if not ts:
             return None
-        if (datetime.now() - datetime.fromisoformat(ts)).days > self.ttl_days:
+        if self._expired(ts, datetime.now()):
             return None
         return self.cache.get(key)
 
@@ -278,10 +288,16 @@ def _parse_page_age(raw: str) -> Optional[str]:
     string ("3 days ago"), sometimes year-only. We only trust an explicit
     YYYY-MM-DD substring; anything else falls back to mtime in the caller.
     """
-    if not raw:
+    if not isinstance(raw, str) or not raw:
         return None
     m = _ISO_DATE_RE.search(raw)
-    return m.group() if m else None
+    if not m:
+        return None
+    try:
+        datetime.strptime(m.group(), "%Y-%m-%d")
+    except ValueError:
+        return None
+    return m.group()
 
 
 def _normalize_results(items: Iterable[dict]) -> List[Dict[str, Any]]:
@@ -342,9 +358,12 @@ class BraveSearchClient:
                 )
                 if resp.status_code in {401, 403}:
                     logger.error("Brave: invalid API key (HTTP %s)", resp.status_code)
-                    return []
+                    raise RuntimeError("Brave authentication failed; file left unchanged")
                 if resp.status_code == 429:
-                    delay = float(resp.headers.get("Retry-After", attempt * 2))
+                    try:
+                        delay = min(60.0, max(0.0, float(resp.headers.get("Retry-After", attempt * 2))))
+                    except ValueError:
+                        delay = attempt * 2
                     logger.warning("Brave rate-limited, sleeping %.1fs", delay)
                     time.sleep(delay)
                     continue
@@ -363,7 +382,7 @@ class BraveSearchClient:
                 logger.warning("Brave request failed (%d/%d): %s",
                                attempt, self.retry_count, e)
                 time.sleep(attempt * 2)
-        return []
+        raise RuntimeError("Brave search failed after retries; file left unchanged")
 
 
 def ffprobe_title(path: str) -> Optional[str]:
@@ -454,7 +473,7 @@ class TitleProcessor:
             title_lc = title.lower()
             # Required tokens (e.g. names extracted from the filename) must
             # appear in the candidate title — otherwise it's a different video.
-            if required_lc and not all(t in title_lc for t in required_lc):
+            if required_lc and not required_lc.issubset(set(re.findall(r"\w+", title_lc))):
                 continue
 
             score = self._similarity(original, title)
@@ -480,6 +499,7 @@ class TitleProcessor:
                     score += 0.05
                 elif abs(int(page_year) - int(year_hint)) > 2:
                     score -= 0.10
+                    page_date = None  # Page update date conflicts with the media year.
 
             if score > best_score:
                 best_score = score
@@ -686,27 +706,29 @@ class VideoFileRenamer:
     @staticmethod
     def _safe(name: str) -> str:
         name = _UNSAFE_FILENAME_RE.sub("_", name)
-        if len(name) > 255:
-            base, ext = os.path.splitext(name)
-            name = base[: 255 - len(ext)] + ext
-        return name
+        name = "".join("_" if ord(c) < 32 or ord(c) == 127 else c for c in name)
+        base, ext = os.path.splitext(name)
+        base = base.encode("utf-8")[:255 - len(ext.encode("utf-8"))].decode("utf-8", errors="ignore")
+        return (base + ext).rstrip(" .")
 
     @staticmethod
     def _unique(directory: str, name: str) -> str:
         base, ext = os.path.splitext(name)
         candidate, counter = name, 1
-        while os.path.exists(os.path.join(directory, candidate)):
-            candidate = f"{base}_{counter}{ext}"
+        while os.path.lexists(os.path.join(directory, candidate)):
+            suffix = f"_{counter}{ext}"
+            truncated = base.encode("utf-8")[:255-len(suffix.encode("utf-8"))].decode("utf-8", errors="ignore")
+            candidate = truncated + suffix
             counter += 1
         return candidate
 
-    def _should_process(self, filename: str, force: bool) -> bool:
+    def _should_process(self, filename: str, force: bool, directory: str = "") -> bool:
         if filename.startswith("."):
             return False
         ext = os.path.splitext(filename)[1].lower()
         if ext not in VIDEO_EXTENSIONS:
             return False
-        if not force and filename in self.renamed_files:
+        if not force and (filename in self.renamed_files or os.path.abspath(os.path.join(directory, filename)) in self.renamed_files):
             self.stats.skipped += 1
             return False
         stem = os.path.splitext(filename)[0]
@@ -789,18 +811,22 @@ class VideoFileRenamer:
         backup = Path(directory) / ".filename_mapping.json"
         mapping: Dict[str, str] = {}
         if backup.exists():
-            try:
-                mapping = json.loads(backup.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as e:
-                logger.error("Cannot read %s: %s", backup, e)
-        mapping[new] = old
+            mapping = json.loads(backup.read_text(encoding="utf-8"))
+            if not isinstance(mapping, dict):
+                raise ValueError(f"Invalid mapping: {backup}")
+        mapping[new] = mapping.get(old, old)
+        temp = None
         try:
-            backup.write_text(
-                json.dumps(mapping, indent=2, ensure_ascii=False),
-                encoding="utf-8",
-            )
-        except OSError as e:
-            logger.error("Cannot write %s: %s", backup, e)
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=directory,
+                                             prefix=".filename_mapping.", delete=False) as stream:
+                temp = stream.name
+                json.dump(mapping, stream, indent=2, ensure_ascii=False)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp, backup)
+        finally:
+            if temp and os.path.exists(temp):
+                os.unlink(temp)
 
     def process(self, directory: str, force: bool = False) -> None:
         if not os.path.isdir(directory):
@@ -827,7 +853,7 @@ class VideoFileRenamer:
             self.progress.tick()
             self.progress.status(filename)
             try:
-                if not self._should_process(filename, force):
+                if not self._should_process(filename, force, directory):
                     self.progress.skipped(filename)
                     continue
                 self.stats.processed += 1
@@ -857,7 +883,15 @@ class VideoFileRenamer:
                     self.progress.skipped(filename)
                     continue
 
-                file_date = datetime.fromtimestamp(os.path.getmtime(path)).strftime("%Y-%m-%d")
+                if os.path.islink(path) or not os.path.isfile(path):
+                    self.progress.skipped(filename)
+                    continue
+                original_stat = os.stat(path)
+                if time.time() - original_stat.st_mtime < float(os.environ.get("BATINAPAPKA_MIN_FILE_AGE", "60")):
+                    logger.info("Skipping recently modified file: %s", filename)
+                    self.stats.skipped += 1
+                    continue
+                file_date = datetime.fromtimestamp(original_stat.st_mtime).strftime("%Y-%m-%d")
                 logger.info("Processing %s", filename)
 
                 embedded = ffprobe_title(path)
@@ -892,14 +926,26 @@ class VideoFileRenamer:
                     logger.info("Source vanished before move: %s", filename)
                     self.progress.skipped(filename)
                     continue
-                self._backup_mapping(directory, filename, new_filename)
+                current_stat = os.stat(path)
+                if (current_stat.st_dev, current_stat.st_ino, current_stat.st_size, current_stat.st_mtime_ns) != (
+                        original_stat.st_dev, original_stat.st_ino, original_stat.st_size, original_stat.st_mtime_ns):
+                    logger.info("Skipping file changed during processing: %s", filename)
+                    self.stats.skipped += 1
+                    continue
                 try:
-                    shutil.move(path, new_path)
+                    # Hard-link creation is atomic and refuses to overwrite a destination.
+                    os.link(path, new_path)
+                    try:
+                        self._backup_mapping(directory, filename, new_filename)
+                    except Exception:
+                        os.unlink(new_path)
+                        raise
+                    os.unlink(path)
                 except FileNotFoundError:
                     logger.info("Source vanished during move: %s", filename)
                     self.progress.skipped(filename)
                     continue
-                self._mark_renamed(new_filename)
+                self._mark_renamed(os.path.abspath(new_path))
                 logger.info('Renamed "%s" -> "%s"', filename, new_filename)
                 self.progress.renamed(filename, new_filename)
                 self.stats.renamed += 1
@@ -989,13 +1035,12 @@ def acquire_single_instance_lock(path: str):
     Returns the open file handle so the caller keeps it alive — fcntl locks
     are released as soon as the fd is closed or the process exits.
     Returns None if another process already holds the lock.
-    Returns False if the lock file can't be opened at all; the caller is
-    expected to proceed unlocked in that case (degraded mode).
+    Returns False if the lock file cannot be opened; the caller must stop.
     """
     try:
         fd = open(path, "w")
     except OSError as e:
-        logger.warning("Cannot open lock file %s: %s (running without lock)", path, e)
+        logger.error("Cannot open lock file %s: %s", path, e)
         return False
     try:
         fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -1068,6 +1113,8 @@ def main() -> int:
     # Refuse to run concurrently with another batinapapka instance — that
     # races over the same directories and produces "file vanished" errors.
     lock = acquire_single_instance_lock(LOCK_FILE)
+    if lock is False:
+        return 73  # Cannot safely proceed without a shared lock.
     if lock is None:
         msg = ("Another batinapapka run is already in progress "
                f"(lock file {os.path.abspath(LOCK_FILE)} is held). "
@@ -1087,6 +1134,7 @@ def main() -> int:
     brave = BraveSearchClient(args.api_key, cache)
     progress = ProgressReporter(enabled=show_progress)
     renamer = VideoFileRenamer(brave, cache, progress=progress)
+    target_errors = 0
     try:
         for target in targets:
             logger.info("Target directory: %s", target)
@@ -1094,6 +1142,7 @@ def main() -> int:
                 renamer.process(target, force=args.force)
             except (ValueError, OSError) as e:
                 logger.error("Skipping %s: %s", target, e)
+                target_errors += 1
     except KeyboardInterrupt:
         progress.finish()
         logger.info("Interrupted by user")
@@ -1103,7 +1152,7 @@ def main() -> int:
     print("\nRenaming completed:")
     for k, v in asdict(renamer.stats).items():
         print(f"  {k}: {v}")
-    return 0
+    return 1 if renamer.stats.errors or target_errors else 0
 
 
 if __name__ == "__main__":

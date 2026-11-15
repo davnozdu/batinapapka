@@ -12,24 +12,28 @@ RUN apt-get update \
         ffmpeg \
         ca-certificates \
         openssh-server \
-        sudo \
         tmux \
         screen \
- && rm -rf /var/lib/apt/lists/*
+        util-linux \
+ && rm -rf /var/lib/apt/lists/* /etc/ssh/ssh_host_*
 
 WORKDIR /app
 
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements-admin.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -r requirements-admin.txt
 
 # Install cyberdrop-dl-patched in its own venv so its deps don't collide
 # with the renamer's. Symlink the CLI onto PATH for interactive use.
+ARG CYBERDROP_VERSION=10.15.3
 RUN python3 -m venv /opt/cyberdrop/venv \
  && /opt/cyberdrop/venv/bin/pip install --no-cache-dir --upgrade pip \
- && /opt/cyberdrop/venv/bin/pip install --no-cache-dir cyberdrop-dl-patched \
- && ln -s /opt/cyberdrop/venv/bin/cyberdrop-dl /usr/local/bin/cyberdrop-dl
+ && /opt/cyberdrop/venv/bin/pip install --no-cache-dir cyberdrop-dl-patched==${CYBERDROP_VERSION}
 
-COPY batinapapka.py ./
+
+COPY batinapapka.py cyberdrop_admin.py cyberdrop_runtime.py configure_cron.py ./
+COPY web ./web
+RUN printf '%s\n' '#!/bin/sh' 'exec /usr/local/bin/python /app/cyberdrop_runtime.py "$@"' > /usr/local/bin/cyberdrop-dl \
+ && chmod +x /usr/local/bin/cyberdrop-dl
 COPY entrypoint-cyberdrop.sh /usr/local/bin/batinapapka-cyberdrop-entrypoint
 RUN chmod +x /usr/local/bin/batinapapka-cyberdrop-entrypoint \
  && printf '%s\n' \
@@ -37,7 +41,7 @@ RUN chmod +x /usr/local/bin/batinapapka-cyberdrop-entrypoint \
         '# cd into /state so file_renamer.log and search_cache.json.gz' \
         '# always land on the persistent volume, no matter where the' \
         '# caller was when they ran this.' \
-        'cd /state' \
+        'cd "${STATE_DIR:-/state}" || exit 1' \
         'exec /usr/local/bin/python /app/batinapapka.py "$@"' \
     > /usr/local/bin/batinapapka \
  && chmod +x /usr/local/bin/batinapapka
@@ -45,7 +49,7 @@ RUN chmod +x /usr/local/bin/batinapapka-cyberdrop-entrypoint \
 VOLUME ["/state", "/videos"]
 WORKDIR /state
 
-EXPOSE 22
+EXPOSE 22 8080
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/batinapapka-cyberdrop-entrypoint"]
 CMD ["--recursive", "/videos"]

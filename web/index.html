@@ -1,0 +1,7 @@
+<!doctype html>
+<html lang="ru"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BatinaPapka · Cyberdrop</title><link rel="stylesheet" href="/static/style.css">
+<body><main><header><span class="badge">BATINAPAPKA</span><h1>Загрузки Cyberdrop</h1><p>Добавляйте ссылки и управляйте загрузками. Очередь продолжает работать, когда браузер закрыт.</p></header>
+<section><h2>Новое задание</h2><form id="add"><label for="urls">Ссылки — по одной в строке</label><textarea id="urls" name="urls" rows="4" placeholder="https://…"></textarea><label for="file">Или TXT-файл со ссылками (UTF-8, до 1 МБ)</label><input id="file" name="file" type="file" accept=".txt,text/plain"><button type="submit">Добавить в очередь</button><p id="notice" role="status"></p></form></section>
+<div class="heading"><h2>Очередь и история</h2><span id="connection" role="status">Подключение…</span></div><div id="jobs"></div>
+<section><div class="heading"><h2 id="log-title">Журнал задания</h2><label><input id="follow" type="checkbox" checked> Прокручивать</label></div><p>Здесь отображается вывод Cyberdrop: текущие операции, ошибки и итоговая статистика. «Завершено» означает завершение процесса; результаты отдельных ссылок смотрите в журнале.</p><pre id="log" aria-live="off">Выберите задание, чтобы открыть журнал.</pre></section><footer id="runtime"></footer></main><script src="/static/app.js" defer></script></body></html>

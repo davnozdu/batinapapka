@@ -1,161 +1,94 @@
 #!/bin/sh
-# Combined entrypoint: starts SSH (if SHELL_USER/SHELL_PASSWORD are set), then
-# behaves the same as the slim image's entrypoint — installs a crontab when
-# CRON_SCHEDULE is non-empty, does an immediate run, and tails the cron log.
-# cyberdrop-dl is preinstalled on PATH for interactive use over SSH.
-
+# Persistent browser queue, optional SSH, and scheduled renaming.
 set -eu
-
 : "${STATE_DIR:=/state}"
-mkdir -p "$STATE_DIR" /run/sshd /videos
+export STATE_DIR
+mkdir -p "$STATE_DIR/cyberdrop/AppData" /run/sshd /videos
 cd "$STATE_DIR"
 
-# Persistent location for everything cyberdrop-dl and the renamer must keep
-# across container recreates: AppData/Configs, AppData/Cache, URLs.txt.
-CYBERDROP_STATE="${STATE_DIR}/cyberdrop"
-mkdir -p "$CYBERDROP_STATE/AppData"
-[ -f "$CYBERDROP_STATE/URLs.txt" ] || touch "$CYBERDROP_STATE/URLs.txt"
-
-# Point default download folders at the mounted /videos. cyberdrop-dl writes
-# to ~/Downloads by default; aliasing it via symlink means downloads land in
-# /videos with no extra flags, and the renamer cron job then picks them up.
-#
-# IMPORTANT: never `rm -rf` a target — if it already is a symlink to /videos,
-# recursive rm would delete the contents of the mounted volume.
-link_downloads() {
-    target_home="$1"
-    [ -d "$target_home" ] || return 0
-    dl="$target_home/Downloads"
-    if [ -d "$dl" ] && [ ! -L "$dl" ]; then
-        return 0
-    fi
-    rm -f "$dl"
-    ln -sfn /videos "$dl"
-    [ -n "${2:-}" ] && chown -h "$2:$2" "$dl" 2>/dev/null || true
-}
-
-# Symlink cyberdrop's own state into /state/cyberdrop so configs, the
-# settings DB and URLs.txt survive `docker compose down && up`. If a fresh
-# install has written real files into ~/AppData or ~/URLs.txt before the
-# symlinks existed, we migrate them once into /state/cyberdrop and then
-# replace them with the symlink.
-link_cyberdrop_state() {
-    target_home="$1"
-    owner="${2:-}"
-    [ -d "$target_home" ] || return 0
-
-    src_appdata="$target_home/AppData"
-    if [ -d "$src_appdata" ] && [ ! -L "$src_appdata" ]; then
-        # Real dir present and persistent slot empty → adopt it.
-        if [ -z "$(ls -A "$CYBERDROP_STATE/AppData" 2>/dev/null)" ]; then
-            rmdir "$CYBERDROP_STATE/AppData" 2>/dev/null || true
-            mv "$src_appdata" "$CYBERDROP_STATE/AppData"
-        fi
-    fi
-    rm -f "$src_appdata"
-    ln -sfn "$CYBERDROP_STATE/AppData" "$src_appdata"
-
-    src_urls="$target_home/URLs.txt"
-    if [ -f "$src_urls" ] && [ ! -L "$src_urls" ]; then
-        if [ ! -s "$CYBERDROP_STATE/URLs.txt" ]; then
-            mv "$src_urls" "$CYBERDROP_STATE/URLs.txt"
-        fi
-    fi
-    rm -f "$src_urls"
-    ln -sfn "$CYBERDROP_STATE/URLs.txt" "$src_urls"
-
-    if [ -n "$owner" ]; then
-        chown -h "$owner:$owner" "$src_appdata" "$src_urls" 2>/dev/null || true
-        # The data itself needs to be writable by cyberdrop-dl, which runs as
-        # SHELL_USER over SSH; chown the persistent tree to the same uid.
-        chown -R "$owner:$owner" "$CYBERDROP_STATE" 2>/dev/null || true
-    fi
-}
-
-# Make sure SSH host keys exist on slim images where the postinst hook
-# may not have created them yet.
-[ -f /etc/ssh/ssh_host_ed25519_key ] || ssh-keygen -A >/dev/null
-
-link_downloads "/root"
-link_cyberdrop_state "/root"
-
-if [ -n "${SHELL_USER:-}" ] && [ -n "${SHELL_PASSWORD:-}" ]; then
+if [ -n "${SHELL_USER:-}" ] || [ -n "${SHELL_PASSWORD:-}" ]; then
+    : "${SHELL_USER:?SHELL_USER and SHELL_PASSWORD must both be set}"
+    : "${SHELL_PASSWORD:?SHELL_USER and SHELL_PASSWORD must both be set}"
+    case "$SHELL_USER" in root|*[!a-z0-9_-]*|-*|[0-9]*|'') echo 'Use a non-root Unix SHELL_USER' >&2; exit 2;; esac
     if ! id -u "$SHELL_USER" >/dev/null 2>&1; then
         useradd -m -s /bin/bash "$SHELL_USER"
-        usermod -aG sudo "$SHELL_USER"
     fi
-    echo "$SHELL_USER:$SHELL_PASSWORD" | chpasswd
-
-    # Hand the state and videos volumes to SHELL_USER so manual renamer runs
-    # from SSH can write the cache, log and renamed-files index. The cron
-    # job below runs as SHELL_USER too — that keeps file ownership consistent
-    # between automated and interactive runs.
-    chown -R "$SHELL_USER:$SHELL_USER" "$STATE_DIR" 2>/dev/null || true
-    chown    "$SHELL_USER:$SHELL_USER" /videos      2>/dev/null || true
-
-    link_downloads "/home/$SHELL_USER" "$SHELL_USER"
-    link_cyberdrop_state "/home/$SHELL_USER" "$SHELL_USER"
-    /etc/init.d/ssh start
-    echo "[entrypoint] SSH on :22 for user '$SHELL_USER'."
-    echo "[entrypoint]   ~/Downloads  -> /videos"
-    echo "[entrypoint]   ~/AppData    -> ${CYBERDROP_STATE}/AppData (persistent)"
-    echo "[entrypoint]   ~/URLs.txt   -> ${CYBERDROP_STATE}/URLs.txt (persistent)"
-    echo "[entrypoint] cyberdrop-dl, tmux, screen are on PATH."
-elif [ -n "${SHELL_USER:-}" ] || [ -n "${SHELL_PASSWORD:-}" ]; then
-    echo "[entrypoint] both SHELL_USER and SHELL_PASSWORD must be set together" >&2
-    exit 2
+    /usr/local/bin/python -c 'import os; value=os.environ["SHELL_PASSWORD"]; assert "\n" not in value and "\r" not in value, "SHELL_PASSWORD must be a single line"'
+    printf '%s:%s\n' "$SHELL_USER" "$SHELL_PASSWORD" | chpasswd
+    chown -R "$SHELL_USER:$SHELL_USER" "$STATE_DIR"
+    chown "$SHELL_USER:$SHELL_USER" /videos
 fi
 
-if [ "$#" -eq 0 ]; then
-    set -- --recursive /videos
+# Preserve conflicting legacy home files; never remove a real directory.
+/usr/local/bin/python - <<'PY'
+import os, pathlib, pwd, shlex
+state = pathlib.Path(os.environ['STATE_DIR'])
+root = state / 'cyberdrop'
+(root / 'URLs.txt').touch(exist_ok=True)
+users = ['root'] + ([os.environ['SHELL_USER']] if os.environ.get('SHELL_USER') else [])
+for user in users:
+    account = pwd.getpwnam(user)
+    home = pathlib.Path(account.pw_dir)
+    for name, dest in [('Downloads', pathlib.Path('/videos')), ('AppData', root/'AppData'), ('URLs.txt', root/'URLs.txt')]:
+        src = home / name
+        if src.is_symlink():
+            src.unlink()
+        elif src.exists():
+            # Adopt old files only if the persistent slot is empty, otherwise back up.
+            empty = dest.is_dir() and not any(dest.iterdir()) or dest.is_file() and dest.stat().st_size == 0
+            if name != 'Downloads' and empty:
+                dest.rmdir() if dest.is_dir() else dest.unlink()
+                src.rename(dest)
+            else:
+                backup = home / (name + '.before-persistent')
+                if backup.exists():
+                    continue
+                src.rename(backup)
+        src.symlink_to(dest, target_is_directory=dest.is_dir())
+        os.lchown(src, account.pw_uid, account.pw_gid)
+# SSH/PAM environment; no sed interpolation of credentials.
+path = pathlib.Path('/etc/environment')
+values = {k: os.environ.get(k, '') for k in ('BRAVE_API_KEY','STATE_DIR','CYBERDROP_AUTO_UPDATE','CYBERDROP_UPDATE_INTERVAL')}
+lines = [line for line in path.read_text().splitlines() if line.split('=',1)[0] not in values]
+for key, value in values.items():
+    if '\n' in value or '\r' in value or '"' in value or '\\' in value:
+        raise ValueError(f'Unsupported characters in {key}')
+    lines.append(f'{key}="{value}"')
+path.write_text('\n'.join(lines)+'\n')
+PY
+
+if [ -n "${SHELL_USER:-}" ]; then
+    # Host identities belong to the installation, not to the shared image.
+    mkdir -p "$STATE_DIR/ssh"
+    chmod 0700 "$STATE_DIR/ssh"
+    for kind in ed25519 rsa; do
+        key="$STATE_DIR/ssh/ssh_host_${kind}_key"
+        [ -f "$key" ] || ssh-keygen -q -t "$kind" -N '' -f "$key"
+    done
+    cat > /etc/ssh/sshd_config.d/batinapapka.conf <<EOF
+PermitRootLogin no
+AllowUsers $SHELL_USER
+HostKey $STATE_DIR/ssh/ssh_host_ed25519_key
+HostKey $STATE_DIR/ssh/ssh_host_rsa_key
+EOF
+    chown -R root:root "$STATE_DIR/ssh"
+    chown -R "$SHELL_USER:$SHELL_USER" "$STATE_DIR/cyberdrop"
+    /usr/sbin/sshd
 fi
 
-QUOTED=""
-for arg in "$@"; do
-    esc=$(printf "%s" "$arg" | sed "s/'/'\\\\''/g")
-    QUOTED="$QUOTED '$esc'"
-done
-
-RENAMER="/usr/local/bin/python /app/batinapapka.py$QUOTED"
-
-if [ -n "${CRON_SCHEDULE:-}" ]; then
-    if [ -z "${BRAVE_API_KEY:-}" ]; then
-        echo "[entrypoint] BRAVE_API_KEY must be set when CRON_SCHEDULE is set" >&2
-        exit 2
-    fi
-
-    # If SHELL_USER is configured, run the cron job as that user so it shares
-    # ownership with manual SSH runs. Otherwise fall back to root.
-    cron_user="${SHELL_USER:-root}"
-    {
-        echo "BRAVE_API_KEY=${BRAVE_API_KEY}"
-        echo "${CRON_SCHEDULE} ${cron_user} cd ${STATE_DIR} && ${RENAMER} >> ${STATE_DIR}/cron.log 2>&1"
-    } > /etc/cron.d/batinapapka
-    chmod 0644 /etc/cron.d/batinapapka
-    touch "${STATE_DIR}/cron.log"
-    [ -n "${SHELL_USER:-}" ] && chown "$SHELL_USER:$SHELL_USER" "${STATE_DIR}/cron.log" 2>/dev/null || true
-
-    # Expose BRAVE_API_KEY to interactive SSH sessions via PAM
-    # (`pam_env` reads /etc/environment by default on Debian).
-    if ! grep -q '^BRAVE_API_KEY=' /etc/environment 2>/dev/null; then
-        echo "BRAVE_API_KEY=${BRAVE_API_KEY}" >> /etc/environment
-    else
-        sed -i "s|^BRAVE_API_KEY=.*|BRAVE_API_KEY=${BRAVE_API_KEY}|" /etc/environment
-    fi
-
-    echo "[entrypoint] one-shot run (cron schedule: ${CRON_SCHEDULE})"
-    # Match the cron job's UID: if SHELL_USER is configured, drop privileges
-    # so the cache, log and renamed-files index are owned by the same user
-    # who'll touch them later from SSH and from cron.
-    if [ -n "${SHELL_USER:-}" ]; then
-        su -p -s /bin/sh -c "$RENAMER" "$SHELL_USER" || true
-    else
-        sh -c "$RENAMER" || true
-    fi
-
+/usr/local/bin/python /app/configure_cron.py "$@"
+if [ -f /etc/cron.d/batinapapka ]; then
     cron
-    exec tail -F "${STATE_DIR}/cron.log"
-else
-    echo "[entrypoint] one-shot mode (no CRON_SCHEDULE)"
-    exec sh -c "$RENAMER"
+    # Don't delay the web UI while a potentially long first pass runs.
+    if [ -n "${SHELL_USER:-}" ]; then
+        setpriv --reuid="$SHELL_USER" --regid="$SHELL_USER" --init-groups /usr/local/bin/run-scheduled-renamer &
+    else
+        /usr/local/bin/run-scheduled-renamer &
+    fi
 fi
+
+# The combined image always stays alive for the browser/SSH, even with cron disabled.
+if [ -n "${SHELL_USER:-}" ]; then
+    exec setpriv --reuid="$SHELL_USER" --regid="$SHELL_USER" --init-groups /usr/local/bin/python /app/cyberdrop_admin.py
+fi
+exec /usr/local/bin/python /app/cyberdrop_admin.py

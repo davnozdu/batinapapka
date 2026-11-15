@@ -19,7 +19,7 @@ services:
       BRAVE_API_KEY: ${BRAVE_API_KEY:?set BRAVE_API_KEY in .env or shell}
       # Empty CRON_SCHEDULE makes the container run once and exit. Default
       # is daily at 03:00. Override via .env if you want a different cadence.
-      CRON_SCHEDULE: "0 3 * * *"
+      CRON_SCHEDULE: "${CRON_SCHEDULE-0 3 * * *}"
 
     volumes:
       # Mount any number of host folders here. The image's default command
