@@ -17,7 +17,7 @@ async function refresh() {
     const card = element('article', undefined, 'job');
     const top = element('div', undefined, 'job-top');
     top.append(element('strong', `${job.urls.length} ссылок · ${new Date(job.created*1000).toLocaleString()}`),element('span',states[job.status] || job.status,`state ${job.status}`));
-    card.append(top,element('p',job.urls.slice(0,3).join('\n') + (job.urls.length > 3 ? '\n…' : ''));
+    card.append(top,element('p',job.urls.slice(0,3).join('\n') + (job.urls.length > 3 ? '\n…' : '')));
     const actions = element('div',undefined,'actions');
     actions.append(button(selected === job.id ? 'Журнал открыт' : 'Открыть журнал','secondary',async()=>{selected=job.id;}));
     if (['running','queued'].includes(job.status)) actions.append(button('Отменить','danger',()=>api(`/api/jobs/${job.id}/cancel`,{method:'POST'})));
