@@ -124,3 +124,12 @@ class TelegramTests(unittest.TestCase):
         self.bot.set_offset(2)
         with self.queue.connect() as db:
             self.assertEqual(db.execute("SELECT count(*) FROM telegram_state WHERE key LIKE 'receipt:%'").fetchone()[0],0)
+
+    def test_api_payload_contains_menu_and_unknown_commands_do_not_block(self):
+        from telegram_bot import MENU
+        self.bot.session.post=Mock(return_value=Mock(status_code=200,json=Mock(return_value={'ok':True,'result':{}})))
+        TelegramBot.send(self.bot,123456789,'Choose an action')
+        payload=self.bot.session.post.call_args.kwargs['json']
+        self.assertEqual(payload['reply_markup'],MENU)
+        self.bot.handle(self.message('/choose_unknown'))
+        self.assertEqual(self.queue.list(),[])

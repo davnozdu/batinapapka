@@ -217,7 +217,7 @@ class TelegramBot:
             self.send(ident,'Отправьте ссылку на файл/альбом. Для нескольких ссылок — по одной в строке. После всей обработки придёт одно итоговое уведомление.')
         elif command=='/queue':
             self.show_jobs(ident)
-        elif command.startswith('/choose_'):
+        elif command in ('/choose_pause','/choose_resume','/choose_cancel'):
             self.show_jobs(ident,command.removeprefix('/choose_'))
         elif command in ('/pause','/resume','/cancel'):
             try:

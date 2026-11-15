@@ -80,7 +80,7 @@ cover queue/status/pause/resume/cancel/log operations. No per-file messages are
 emitted: notification state is persisted per terminal job. Telegram update
 offsets and pending-link receipts prevent duplicate job creation on replay.
 
-44 tests cover queue controls, deletion/data preservation, process resumption,
+45 tests cover queue controls, deletion/data preservation, process resumption,
 Telegram authorization, settings, button callbacks, replay protection and
 whole-job notifications/retry. A live getMe request verified the supplied bot
 token; the user opted to enter runtime configuration themselves, so no bot
