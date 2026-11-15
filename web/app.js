@@ -16,7 +16,7 @@ async function refresh() {
   for (const job of jobs) {
     const card = element('article', undefined, 'job');
     const top = element('div', undefined, 'job-top');
-    top.append(element('strong', `${job.urls.length} ссылок · ${new Date(job.created*1000).toLocaleString()}`),element('span',states[job.status] || job.status,`state ${job.status}`));
+    top.append(element('strong', `${job.kind === "rename" ? "Переименование" : job.urls.length+" ссылок"} · ${new Date(job.created*1000).toLocaleString()}`),element('span',(job.kind === "rename" && job.status === "running" ? "Переименовывается" : states[job.status]) || job.status,`state ${job.status}`));
     card.append(top,element('p',job.urls.slice(0,3).join('\n') + (job.urls.length > 3 ? '\n…' : '')));
     const actions = element('div',undefined,'actions');
     actions.append(button(selected === job.id ? 'Журнал открыт' : 'Открыть журнал','secondary',async()=>{selected=job.id;}));
@@ -32,3 +32,11 @@ async function refresh() {
 }
 async function poll(){try {await refresh();} catch(e) {$('connection').textContent='Нет связи: '+e.message;} finally {setTimeout(poll,2000);}}
 poll();
+
+async function loadSettings() {
+  try {const config=await api('/api/settings');$('metadata-enabled').checked=config.enabled;$('metadata-status').textContent=config.configured?'Токен сохранён. Настройки применятся при следующем запуске переименовщика.':'Токен ещё не задан. Сейчас доступен поиск Brave.';} catch(e) {$('metadata-status').textContent=e.message;}
+}
+$('settings').onsubmit=async e=>{e.preventDefault();const btn=e.target.querySelector('button');btn.disabled=true;try {await api('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:$('metadata-enabled').checked,tpdb_api_key:$('tpdb-key').value})});$('tpdb-key').value='';await loadSettings();} catch(e) {$('metadata-status').textContent=e.message;} finally {btn.disabled=false;}};
+loadSettings();
+
+$('rename').onclick=async()=>{const btn=$('rename');btn.disabled=true;try {const job=await api('/api/rename',{method:'POST'});selected=job.id;$('notice').textContent='Переименование добавлено в очередь.';await refresh();} catch(e) {$('notice').textContent=e.message;} finally {btn.disabled=false;}};

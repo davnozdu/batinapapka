@@ -18,6 +18,7 @@ services:
     restart: unless-stopped
 
     environment:
+      TPDB_API_KEY: ${TPDB_API_KEY:-}
       BRAVE_API_KEY: ${BRAVE_API_KEY:-}
       CRON_SCHEDULE: "${CRON_SCHEDULE-0 3 * * *}"
       SHELL_USER: ${SHELL_USER:?set SHELL_USER in .env or shell}

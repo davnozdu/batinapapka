@@ -14,7 +14,8 @@ services:
     restart: unless-stopped
 
     environment:
-      BRAVE_API_KEY: ${BRAVE_API_KEY:?set BRAVE_API_KEY in .env or shell}
+      TPDB_API_KEY: ${TPDB_API_KEY:-}
+      BRAVE_API_KEY: ${BRAVE_API_KEY:-}
       CRON_SCHEDULE: "${CRON_SCHEDULE-0 3 * * *}"
 
     volumes:

@@ -286,6 +286,24 @@ a scheduled run was skipped. The renamer uses atomic hard links for safe
 renaming, so the video filesystem must support hard links. See [AUDIT.md](AUDIT.md)
 for findings, validation and limits.
 
+## Prefer catalog metadata before web search
+
+In the admin page open **Поиск названий · ThePornDB**, enter a token from
+<https://theporndb.net/user/api-tokens> and save. Alternatively set `TPDB_API_KEY`
+in `.env`. The token is stored only in `/state/metadata-settings.json` with
+permissions 0600 and never returned to the browser. Blank input preserves it;
+uncheck the catalog option to disable lookup. Changes apply on the next
+renamer run. Use **Переименовать загруженные видео** to enqueue that run from
+the browser; its log, cancellation and retry use the same queue.
+
+The renamer checks exact OSHASH matches first, then embedded title/filename
+metadata in ThePornDB, then Brave if no confident catalog match exists. A
+catalog match uses its **release date and title**: `YYYY-MM-DD Title.ext`.
+Ambiguous title matches are rejected. A network/auth error at the catalog also
+falls back to Brave. Without a Brave key, unmatched catalog-only files are
+left untouched. No video is uploaded; only the fingerprint and search names.
+OSHASH is fast (128 KiB read) but does not recognize arbitrary re-encodings.
+
 ## Example
 
 Before:

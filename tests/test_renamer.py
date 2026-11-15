@@ -16,6 +16,7 @@ class RenamerTests(unittest.TestCase):
         os.chdir(self.temp.name)
         self.client=Mock()
         self.client.search.return_value=[]
+        self.client.session.headers.get.return_value="test-key"
         self.renamer=bp.VideoFileRenamer(self.client,bp.CompressedCache('cache.gz'))
 
     def tearDown(self):

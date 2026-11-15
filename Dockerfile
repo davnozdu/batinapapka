@@ -19,7 +19,7 @@ COPY requirements.txt ./
 RUN pip install --no-cache-dir --upgrade pip \
  && pip install --no-cache-dir -r requirements.txt
 
-COPY batinapapka.py configure_cron.py ./
+COPY batinapapka.py metadata_lookup.py configure_cron.py ./
 COPY entrypoint.sh /usr/local/bin/batinapapka-entrypoint
 RUN chmod +x /usr/local/bin/batinapapka-entrypoint \
  && printf '%s\n' \

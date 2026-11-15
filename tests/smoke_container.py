@@ -46,6 +46,8 @@ try:
     assert 'Unknown option' not in log and 'No such option' not in log and 'Traceback' not in log, log
     assert 'Cyberdrop' in log or 'cyberdrop' in log, log
     docker('restart',container)
+    port = docker('port', container, '8080/tcp').split(':')[-1]
+    base = 'http://127.0.0.1:' + port
     for _ in range(60):
         try:
             assert json.loads(request('/api/jobs'))[0]['id']==ident

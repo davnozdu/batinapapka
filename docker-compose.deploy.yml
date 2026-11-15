@@ -16,7 +16,8 @@ services:
     restart: unless-stopped
 
     environment:
-      BRAVE_API_KEY: ${BRAVE_API_KEY:?set BRAVE_API_KEY in .env or shell}
+      TPDB_API_KEY: ${TPDB_API_KEY:-}
+      BRAVE_API_KEY: ${BRAVE_API_KEY:-}
       # Empty CRON_SCHEDULE makes the container run once and exit. Default
       # is daily at 03:00. Override via .env if you want a different cadence.
       CRON_SCHEDULE: "${CRON_SCHEDULE-0 3 * * *}"

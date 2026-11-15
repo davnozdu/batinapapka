@@ -6,7 +6,6 @@ mkdir -p "$STATE_DIR"
 cd "$STATE_DIR"
 if [ "$#" -eq 0 ]; then set -- --recursive /videos; fi
 if [ -n "${CRON_SCHEDULE:-}" ]; then
-    : "${BRAVE_API_KEY:?BRAVE_API_KEY must be set}"
     /usr/local/bin/python /app/configure_cron.py "$@"
     touch "$STATE_DIR/cron.log"
     /usr/local/bin/run-scheduled-renamer || true

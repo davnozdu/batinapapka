@@ -30,6 +30,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import urlparse
 
 import requests
+from metadata_lookup import MetadataClient
 from rapidfuzz import fuzz
 from unidecode import unidecode
 
@@ -527,6 +528,7 @@ class Stats:
     no_search_results: int = 0
     using_original_name: int = 0
     used_embedded_title: int = 0
+    matched_metadata: int = 0
 
 
 class ProgressReporter:
@@ -677,8 +679,10 @@ class VideoFileRenamer:
         brave_client: BraveSearchClient,
         cache: CompressedCache,
         progress: Optional[ProgressReporter] = None,
+        metadata_client=None,
     ):
         self.cache = cache
+        self.metadata_client = metadata_client or MetadataClient(cache)
         self.brave_client = brave_client
         self.title = TitleProcessor()
         self.renamed_files = self._load_renamed()
@@ -899,7 +903,19 @@ class VideoFileRenamer:
                     logger.info('Embedded title: "%s"', embedded)
                     self.stats.used_embedded_title += 1
 
-                date, new_title, merged = self._cascade_search(base, embedded)
+                metadata = self.metadata_client.lookup(path, base, embedded)
+                if metadata:
+                    date, raw_title, source = metadata
+                    new_title = self.title.clean_title(raw_title)
+                    merged = []
+                    self.stats.matched_metadata += 1
+                    logger.info("Matched metadata via %s: %s (%s)", source, new_title, date)
+                elif self.brave_client.session.headers.get("X-Subscription-Token"):
+                    date, new_title, merged = self._cascade_search(base, embedded)
+                else:
+                    logger.info("No metadata match and no Brave key; leaving %s unchanged", filename)
+                    self.stats.skipped += 1
+                    continue
 
                 if not new_title:
                     if embedded and len(embedded) >= 3:
@@ -1101,8 +1117,8 @@ def main() -> int:
     )
     configure_logging(args.debug, args.verbose, show_progress)
 
-    if not args.api_key:
-        logger.error("Brave API key missing (use --api-key or BRAVE_API_KEY env var)")
+    if not args.api_key and not MetadataClient().enabled:
+        logger.error("Configure BRAVE_API_KEY or a ThePornDB token in the browser / TPDB_API_KEY")
         return 2
 
     targets = _expand_targets(args.directories, args.recursive)

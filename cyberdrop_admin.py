@@ -1,7 +1,7 @@
 """Persistent, single-worker Cyberdrop queue and authenticated browser UI."""
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import codecs
 import fcntl
 import hmac
@@ -17,8 +17,11 @@ import subprocess
 import sys
 import threading
 import time
+import tempfile
 from urllib.parse import urlsplit
 import uuid
+
+from metadata_lookup import load_settings
 
 from flask import Flask, abort, jsonify, request, send_from_directory
 
@@ -38,7 +41,11 @@ class Queue:
         with self.connect() as db:
             db.execute('''CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY, urls TEXT NOT NULL, status TEXT NOT NULL,
-                created REAL NOT NULL, started REAL, finished REAL, exit_code INTEGER)''')
+                created REAL NOT NULL, started REAL, finished REAL, exit_code INTEGER,
+                kind TEXT NOT NULL DEFAULT 'download')''')
+            columns = [r['name'] for r in db.execute('PRAGMA table_info(jobs)')]
+            if 'kind' not in columns:
+                db.execute("ALTER TABLE jobs ADD COLUMN kind TEXT NOT NULL DEFAULT 'download'")
 
     @contextmanager
     def connect(self):
@@ -78,6 +85,13 @@ class Queue:
                        (ident, json.dumps(urls), 'queued', time.time()))
         return ident
 
+    def add_renamer(self):
+        ident = uuid.uuid4().hex
+        with self.connect() as db:
+            db.execute("INSERT INTO jobs(id,urls,status,created,kind) VALUES(?,?,'queued',?,'rename')",
+                       (ident, '[]', time.time()))
+        return ident
+
     def list(self):
         with self.connect() as db:
             return [dict(r) | {'urls': json.loads(r['urls'])} for r in db.execute(
@@ -111,6 +125,9 @@ class Queue:
             return ANSI.sub('', stream.read().decode('utf-8', errors='replace')).replace('\r', '\n')
 
     def command(self, job):
+        if job['kind'] == 'rename':
+            return [sys.executable, str(Path(__file__).with_name('batinapapka.py')), '--recursive',
+                    os.environ.get('DOWNLOAD_DIR', '/videos')]
         return [sys.executable, str(Path(__file__).with_name('cyberdrop_runtime.py')), 'download',
                 '--input-file', str(self.jobs / f"{job['id']}.txt"),
                 '--download-folder', os.environ.get('DOWNLOAD_DIR', '/videos'),
@@ -138,8 +155,9 @@ class Queue:
         for filename in ('config.yaml', 'cyberdrop.db', 'cache.json'):
             (self.root / filename).touch(exist_ok=True)
         # The same lock as the renamer: never rename an active download.
-        with (self.state / '.batinapapka.lock').open('a') as lock:
-            while not self.stop.is_set():
+        context = (self.state / '.batinapapka.lock').open('a') if job['kind'] == 'download' else nullcontext()
+        with context as lock:
+            while lock is not None and not self.stop.is_set():
                 if self.status(ident) == 'cancelling':
                     break
                 try:
@@ -154,9 +172,9 @@ class Queue:
             output.setLevel(logging.INFO)
             output.propagate = False
             output.addHandler(handler)
-            output.info('Starting / resuming Cyberdrop download')
+            output.info('Starting / resuming %s', job['kind'])
             try:
-                self.proc = subprocess.Popen(self.command(job), cwd=self.root, stdin=subprocess.DEVNULL,
+                self.proc = subprocess.Popen(self.command(job), cwd=self.state if job['kind'] == 'rename' else self.root, stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True,
                     env=os.environ | {'PYTHONUNBUFFERED': '1', 'FORCE_COLOR': '1', 'COLUMNS': '100', 'CYBERDROP_QUEUE_LOCKED': '1'})
                 # Drain output independently so cancellation works even if no output arrives.
@@ -265,6 +283,12 @@ def create_app(queue, username, password):
         except ValueError as exc:
             return jsonify(error=str(exc)), 400
 
+    @app.post('/api/rename')
+    def rename():
+        if not load_settings(queue.state)['tpdb_api_key'] and not os.environ.get('BRAVE_API_KEY'):
+            return jsonify(error='Сначала задайте токен ThePornDB или BRAVE_API_KEY'), 400
+        return jsonify(id=queue.add_renamer()), 201
+
     @app.post('/api/jobs/<ident>/<action>')
     def action(ident, action):
         if action not in ('cancel', 'retry'):
@@ -281,6 +305,32 @@ def create_app(queue, username, password):
         if value is None:
             abort(404)
         return jsonify(log=value)
+
+    @app.get('/api/settings')
+    def settings():
+        config = load_settings(queue.state)
+        return jsonify(enabled=config['enabled'], configured=bool(config['tpdb_api_key']))
+
+    @app.post('/api/settings')
+    def save_settings():
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict) or not isinstance(data.get('enabled'), bool):
+            return jsonify(error='Некорректные настройки'), 400
+        key = data.get('tpdb_api_key', '')
+        if not isinstance(key, str) or len(key) > 4096 or any(ord(c) < 32 for c in key):
+            return jsonify(error='Некорректный токен'), 400
+        current = load_settings(queue.state)
+        config = {'enabled': data['enabled'], 'tpdb_api_key':key.strip() or current['tpdb_api_key']}
+        path = queue.state / 'metadata-settings.json'
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=queue.state,
+                                         prefix='.metadata-settings-', delete=False) as stream:
+            json.dump(config, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+            temp = stream.name
+        os.chmod(temp, 0o600)
+        os.replace(temp, path)
+        return jsonify(enabled=config['enabled'], configured=bool(config['tpdb_api_key']))
 
     @app.get('/api/runtime')
     def runtime():
@@ -318,6 +368,9 @@ def main():
     signal.signal(signal.SIGINT, shutdown)
     try:
         server.run()
+    except OSError:
+        if not queue.stop.is_set():
+            raise
     finally:
         queue.stop.set()
         worker.join(timeout=25)

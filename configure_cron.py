@@ -12,14 +12,16 @@ def main():
     user = os.environ.get('SHELL_USER') or 'root'
     target = Path('/etc/cron.d/batinapapka')
     target.unlink(missing_ok=True)
-    if not schedule or not os.environ.get('BRAVE_API_KEY'):
+    if not schedule:
         return
     if len(schedule.split()) != 5 or any(c in schedule for c in '\r\n%'):
         raise ValueError('CRON_SCHEDULE must contain five cron fields, without newlines or %')
     runner = state / '.run-renamer.sh'
     args = sys.argv[1:] or ['--recursive', '/videos']
     runner.write_text('#!/bin/sh\n' + 'cd ' + shlex.quote(str(state)) + '\n' +
-                      'export BRAVE_API_KEY=' + shlex.quote(os.environ['BRAVE_API_KEY']) + '\n' +
+                      'export BRAVE_API_KEY=' + shlex.quote(os.environ.get('BRAVE_API_KEY', '')) + '\n' +
+                      'export TPDB_API_KEY=' + shlex.quote(os.environ.get('TPDB_API_KEY', '')) + '\n' +
+                      'export STATE_DIR=' + shlex.quote(str(state)) + '\n' +
                       'exec /usr/local/bin/python /app/batinapapka.py ' + shlex.join(args) + '\n')
     runner.chmod(0o700)
     import pwd

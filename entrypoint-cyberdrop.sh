@@ -48,7 +48,7 @@ for user in users:
         os.lchown(src, account.pw_uid, account.pw_gid)
 # SSH/PAM environment; no sed interpolation of credentials.
 path = pathlib.Path('/etc/environment')
-values = {k: os.environ.get(k, '') for k in ('BRAVE_API_KEY','STATE_DIR','CYBERDROP_AUTO_UPDATE','CYBERDROP_UPDATE_INTERVAL')}
+values = {k: os.environ.get(k, '') for k in ('BRAVE_API_KEY','TPDB_API_KEY','STATE_DIR','CYBERDROP_AUTO_UPDATE','CYBERDROP_UPDATE_INTERVAL')}
 lines = [line for line in path.read_text().splitlines() if line.split('=',1)[0] not in values]
 for key, value in values.items():
     if '\n' in value or '\r' in value or '"' in value or '\\' in value:

@@ -10,7 +10,15 @@ The existing main branch and its history contained SSH/Cyberdrop integration but
 - V10 config, database, cache, logs and XDG directories persist under `/state/cyberdrop`. Legacy `AppData` is retained, but V10 uses a different configuration format; old credentials/settings may need migration into `config.yaml`.
 - Updated requests, rapidfuzz and Unidecode; added pinned Flask and Waitress. Python minimum is now 3.12 for the combined image and 3.11 for the standalone renamer.
 - Removed sudo from the combined image. SSH host keys are generated per installation and persisted, rather than embedded in a shared image. Browser access requires credentials; POSTs require a custom header with no CORS support; CSP prevents framing and remote scripts. Compose binds the admin port to localhost by default. Use a VPN, SSH tunnel or HTTPS reverse proxy for remote access.
-- Compose now respects `CRON_SCHEDULE` from `.env`. The combined image stays running even when cron or Brave is disabled. Renaming is skipped when there is no Brave key. Scheduled credentials and arguments live in a private script instead of unescaped cron text.
+- Compose now respects `CRON_SCHEDULE` from `.env`. The combined image stays running even when cron or Brave is disabled. Renaming requires a Brave key or a configured ThePornDB token. Scheduled credentials and arguments live in a private script instead of unescaped cron text.
+
+## Metadata-first matching
+
+Read-only ThePornDB integration precedes Brave: exact OSHASH matching in scenes/movies, then conservative matching of embedded titles/filenames against scene metadata. Exact returned fingerprints are verified; ambiguous or weak title matches are rejected. A match uses the catalog release date and title in the existing `YYYY-MM-DD Title.ext` format. No match or a catalog/network failure falls back to Brave. Catalog-only mode leaves unmatched files untouched if no Brave key is configured.
+
+The browser can save/disable the catalog token and enqueue a renamer run in the same durable queue. Stored tokens are mode 0600 and never returned by the API. The `.env` alternative is `TPDB_API_KEY`. The video itself is not uploaded; fingerprint and query names are sent. OSHASH identifies matching file versions; re-encoded files may require the name fallback. This does not implement perceptual video hashing.
+
+The supplied test token returned HTTP 200. A live OSHASH lookup returned one record with a verified matching hash, and 20 sampled records contained valid release dates. Test tokens were not saved in project files. Integration is based on [ThePornDB's reference client](https://github.com/ThePornDatabase/namer/blob/main/namer/metadataapi.py) and the [OSHash specification](https://opensubtitles.github.io/oshash/). The old porndb.me API was shut down on 2026-10-16; [migration notice](https://porndb.me/migration/).
 
 ## Renamer correctness
 
@@ -25,7 +33,7 @@ The existing main branch and its history contained SSH/Cyberdrop integration but
 
 ## Validation
 
-Unit/integration tests cover queue persistence, browser authentication, CSRF rejection, TXT upload, input validation, real subprocess completion/cancellation/shutdown, rename mappings/repeated runs, corrupt state, changing files, UTF-8 collisions, name/date matching and Brave auth failures. Live Brave API returned 19 normalized results with the provided temporary test key; no key was saved in project files. Actual Cyberdrop v10 invocation completed against an unsupported test URL and emitted its final statistics.
+26 unit/integration tests cover queue persistence, browser authentication, CSRF rejection, TXT upload, input validation, real subprocess completion/cancellation/shutdown, rename mappings/repeated runs, corrupt state, changing files, UTF-8 collisions, name/date matching and Brave auth failures. Live Brave API returned 19 normalized results with the provided temporary test key; no key was saved in project files. Actual Cyberdrop v10 invocation completed against an unsupported test URL and emitted its final statistics.
 
 `pip-audit -r requirements.txt -r requirements-admin.txt` found no known vulnerabilities in the resolved application dependencies at audit time. A full local environment audit also identified an outdated development-venv pip (26.1.2); the image/updater upgrades pip before installing Cyberdrop. This is not an OS package security scan.
 
