@@ -66,3 +66,29 @@ class UpdateTests(unittest.TestCase):
             with closing(sqlite3.connect(current)) as db, db:
                 self.assertEqual(db.execute('SELECT count(*) FROM history').fetchone()[0],2)
             self.assertTrue(legacy.exists())
+
+    def test_new_image_uses_its_bundle_instead_of_older_persistent_venv(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            bundled=root/'bundled';bundled.touch()
+            old=root/'venv-10.15.3-1234abcd/bin/cyberdrop-dl'
+            old.parent.mkdir(parents=True);old.touch()
+            (root/'current').symlink_to(old.parent.parent.name,target_is_directory=True)
+            with patch.dict(os.environ,{'CYBERDROP_BUNDLED':str(bundled),'CYBERDROP_BUNDLED_VERSION':'10.16.0'}):
+                self.assertEqual(runtime.executable(root),str(bundled))
+                newer=root/'venv-10.17.0-1234abcd/bin/cyberdrop-dl'
+                newer.parent.mkdir(parents=True);newer.touch()
+                (root/'current').unlink();(root/'current').symlink_to(newer.parent.parent.name,target_is_directory=True)
+                self.assertEqual(runtime.executable(root),str(root/'current/bin/cyberdrop-dl'))
+
+    def test_new_bundle_bypasses_old_interval_cache(self):
+        with tempfile.TemporaryDirectory() as temp:
+            import time
+            root=Path(temp)
+            (root/'status.json').write_text(json.dumps({'checked':time.time(),'version':'10.15.3'}))
+            with patch.dict(os.environ,{'CYBERDROP_BUNDLED_VERSION':'10.16.0','CYBERDROP_AUTO_UPDATE':'0'}), \
+                 patch.object(runtime.subprocess,'check_output',return_value='10.16.0'), \
+                 patch.object(runtime.urllib.request,'urlopen') as network:
+                runtime.update(root)
+                self.assertEqual(json.loads((root/'status.json').read_text())['version'],'10.16.0')
+                network.assert_not_called()

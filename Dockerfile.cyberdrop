@@ -27,6 +27,7 @@ RUN pip install --no-cache-dir --upgrade pip \
 # with the renamer's. Symlink the CLI onto PATH for interactive use.
 # Reproducible local default; CI resolves/passes the newest stable release.
 ARG CYBERDROP_VERSION=10.16.0
+ENV CYBERDROP_BUNDLED_VERSION=${CYBERDROP_VERSION}
 LABEL io.batinapapka.cyberdrop.version=${CYBERDROP_VERSION}
 RUN python3 -m venv /opt/cyberdrop/venv \
  && /opt/cyberdrop/venv/bin/pip install --no-cache-dir --upgrade pip \

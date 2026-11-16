@@ -4,6 +4,7 @@ from contextlib import closing
 import json
 import logging
 import os
+import re
 from pathlib import Path
 import subprocess
 import sqlite3
@@ -20,9 +21,24 @@ def run_checked(args, timeout):
     subprocess.run(args, stdin=subprocess.DEVNULL, check=True, timeout=timeout)
 
 
+def stable_version(value):
+    if isinstance(value, str) and re.fullmatch(r'\d+\.\d+\.\d+', value):
+        return tuple(int(part) for part in value.split('.'))
+    return None
+
+
 def executable(root):
     current = root / 'current' / 'bin' / 'cyberdrop-dl'
-    return str(current if current.exists() else Path(os.environ.get('CYBERDROP_BUNDLED', '/opt/cyberdrop/venv/bin/cyberdrop-dl')))
+    bundled = Path(os.environ.get('CYBERDROP_BUNDLED', '/opt/cyberdrop/venv/bin/cyberdrop-dl'))
+    if not current.exists():
+        return str(bundled)
+    # A new image must not keep using an older venv persisted by the previous
+    # image. Keep a persistent venv only when it is newer than the bundled CLI.
+    match = re.fullmatch(r'venv-(\d+\.\d+\.\d+)-[0-9a-f]{8}', (root / 'current').resolve().name)
+    bundled_version = stable_version(os.environ.get('CYBERDROP_BUNDLED_VERSION', ''))
+    if match and bundled_version and bundled.exists() and bundled_version >= stable_version(match[1]):
+        return str(bundled)
+    return str(current)
 
 
 def update(root):
@@ -35,9 +51,12 @@ def update(root):
         except (OSError, ValueError):
             status = {}
         interval = max(300, int(os.environ.get('CYBERDROP_UPDATE_INTERVAL', '86400')))
-        if time.time() - status.get('checked', 0) < interval:
+        bundled_version = stable_version(os.environ.get('CYBERDROP_BUNDLED_VERSION', ''))
+        previous_version = stable_version(status.get('version'))
+        new_bundle = bool(bundled_version and previous_version and bundled_version > previous_version)
+        if time.time() - status.get('checked', 0) < interval and not new_bundle:
             return
-        version = status.get('version')
+        version = None if new_bundle else status.get('version')
         try:
             if not version:
                 version = subprocess.check_output([executable(root), '--version'], timeout=30, text=True).strip()

@@ -440,3 +440,7 @@ Pull/recreate the container as usual, retaining `/state` and `/videos`:
 docker compose pull
 docker compose up -d
 ```
+
+A new image also takes precedence over an older self-updated runtime venv in
+`/state`, without waiting for its previous update interval to expire. A newer
+persisted runtime is retained rather than downgraded to the bundled version.

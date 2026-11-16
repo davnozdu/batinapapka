@@ -99,5 +99,5 @@ Normal builds resolve the current stable version so later application pushes
 do not reinstall the old Dockerfile fallback. Local default updated from
 10.15.3 to 10.16.0.
 
-51 tests and actionlint validation passed locally. Real scheduled-workflow
+53 tests and actionlint validation passed locally. A newer bundled CLI now supersedes an older persistent runtime immediately; newer persisted runtimes remain preferred. Real scheduled-workflow
 validation is performed by manual dispatch against the newly released 10.16.0.

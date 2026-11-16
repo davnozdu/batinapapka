@@ -40,6 +40,13 @@ try:
     if os.environ.get('EXPECTED_CYBERDROP_VERSION'):
         assert bundled == os.environ['EXPECTED_CYBERDROP_VERSION'], bundled
     assert json.loads(request('/api/telegram')) == {'enabled':False,'configured':False,'allowed_user_ids':[]}
+    # An older runtime venv from the previous image must not shadow the new bundle.
+    docker('exec', '-u', 'smoke', container, 'python', '-c',
+           "from pathlib import Path; import json,time; r=Path('/state/cyberdrop/runtime'); r.mkdir(exist_ok=True); "
+           "p=r/'venv-10.15.3-1234abcd/bin/cyberdrop-dl'; p.parent.mkdir(parents=True); "
+           "p.write_text('#!/bin/sh\\necho old-runtime-should-not-run\\n'); p.chmod(0o755); "
+           "(r/'current').symlink_to(p.parent.parent.name,target_is_directory=True); "
+           "(r/'status.json').write_text(json.dumps({'version':'10.15.3','checked':time.time()}))")
     identity = docker('exec', container, 'cat', '/state/ssh/ssh_host_ed25519_key.pub')
     # Reproduce an existing V9 installation: V10 used to fail despite an explicit config.
     docker('exec', '-u', 'smoke', container, 'python', '-c',
@@ -55,6 +62,7 @@ try:
         raise AssertionError('Actual Cyberdrop process did not finish')
     log=json.loads(request(f'/api/jobs/{ident}/log'))['log']
     print(log[-12000:])
+    assert 'old-runtime-should-not-run' not in log, log
     assert 'Migration Error' not in log and job['status'] == 'done', log
     assert 'Unknown option' not in log and 'No such option' not in log and 'Traceback' not in log, log
     assert 'Cyberdrop' in log or 'cyberdrop' in log, log
