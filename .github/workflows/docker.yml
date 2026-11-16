@@ -7,6 +7,23 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      cyberdrop_version:
+        description: Cyberdrop version (blank resolves the latest stable PyPI release)
+        type: string
+        default: ''
+      cyberdrop_only:
+        description: Build only the combined Cyberdrop image
+        type: boolean
+        default: false
+  workflow_call:
+    inputs:
+      cyberdrop_version:
+        type: string
+        default: ''
+      cyberdrop_only:
+        type: boolean
+        default: false
 
 env:
   REGISTRY: ghcr.io
@@ -15,6 +32,39 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      cyberdrop_version: ${{ steps.release.outputs.version }}
+      matrix: ${{ steps.matrix.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Resolve exact Cyberdrop version
+        id: release
+        env:
+          REQUESTED_VERSION: ${{ inputs.cyberdrop_version }}
+        run: python scripts/check_cyberdrop_release.py --resolve-only --version "$REQUESTED_VERSION"
+      - name: Select images
+        id: matrix
+        env:
+          CYBERDROP_ONLY: ${{ inputs.cyberdrop_only }}
+        run: |
+          python - <<'PYCODE'
+          import json, os
+          matrix = [{'name':'batinapapka-cyberdrop','dockerfile':'Dockerfile.cyberdrop',
+                     'image':'ghcr.io/davnozdu/batinapapka-cyberdrop','platforms':'linux/amd64'}]
+          if os.environ['CYBERDROP_ONLY'] != 'true':
+              matrix.insert(0, {'name':'batinapapka','dockerfile':'Dockerfile',
+                                'image':'ghcr.io/davnozdu/batinapapka','platforms':'linux/amd64,linux/arm64'})
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write('value='+json.dumps({'include':matrix})+'\n')
+          PYCODE
+
   test:
     runs-on: ubuntu-latest
     permissions:
@@ -31,7 +81,7 @@ jobs:
       - run: pip-audit -r requirements.txt -r requirements-admin.txt
 
   build:
-    needs: test
+    needs: [prepare, test]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -40,18 +90,11 @@ jobs:
 
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - name: batinapapka
-            dockerfile: Dockerfile
-            image: ghcr.io/davnozdu/batinapapka
-            platforms: linux/amd64,linux/arm64
-          - name: batinapapka-cyberdrop
-            dockerfile: Dockerfile.cyberdrop
-            image: ghcr.io/davnozdu/batinapapka-cyberdrop
-            # cyberdrop-dl-patched does not always have prebuilt arm64 wheels
-            # for its transitive deps; pin to amd64 to keep CI green.
-            platforms: linux/amd64
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+
+    concurrency:
+      group: publish-${{ matrix.name }}-${{ github.ref }}
+      cancel-in-progress: false
 
     steps:
       - name: Checkout
@@ -72,11 +115,14 @@ jobs:
           platforms: linux/amd64
           load: true
           tags: batinapapka-cyberdrop:smoke
+          build-args: CYBERDROP_VERSION=${{ needs.prepare.outputs.cyberdrop_version }}
           cache-from: type=gha,scope=${{ matrix.name }}
           cache-to: type=gha,scope=${{ matrix.name }},mode=max
 
       - name: Verify web queue and Cyberdrop in the built image
         if: matrix.name == 'batinapapka-cyberdrop'
+        env:
+          EXPECTED_CYBERDROP_VERSION: ${{ needs.prepare.outputs.cyberdrop_version }}
         run: python3 tests/smoke_container.py
 
       - name: Log in to GHCR
@@ -98,7 +144,8 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=sha,format=short
+            type=sha,format=short,enable=${{ !inputs.cyberdrop_only }}
+            type=raw,value=cyberdrop-${{ needs.prepare.outputs.cyberdrop_version }},enable=${{ matrix.name == 'batinapapka-cyberdrop' }}
             type=raw,value=latest,enable={{is_default_branch}}
           labels: |
             org.opencontainers.image.title=${{ matrix.name }}
@@ -112,6 +159,7 @@ jobs:
           context: .
           file: ${{ matrix.dockerfile }}
           platforms: ${{ matrix.platforms }}
+          build-args: ${{ matrix.name == 'batinapapka-cyberdrop' && format('CYBERDROP_VERSION={0}', needs.prepare.outputs.cyberdrop_version) || '' }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

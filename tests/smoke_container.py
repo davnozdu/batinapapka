@@ -1,6 +1,7 @@
 """Exercise the actual built image, HTTP API and Cyberdrop v10 invocation in CI."""
 import base64
 import json
+import os
 import subprocess
 import time
 import urllib.error
@@ -34,6 +35,10 @@ try:
     else:
         raise AssertionError('Web service did not start')
     assert b'Cyberdrop' in request('/')
+    bundled = docker('exec', container, '/opt/cyberdrop/venv/bin/cyberdrop-dl', '--version')
+    print('Bundled Cyberdrop:', bundled)
+    if os.environ.get('EXPECTED_CYBERDROP_VERSION'):
+        assert bundled == os.environ['EXPECTED_CYBERDROP_VERSION'], bundled
     assert json.loads(request('/api/telegram')) == {'enabled':False,'configured':False,'allowed_user_ids':[]}
     identity = docker('exec', container, 'cat', '/state/ssh/ssh_host_ed25519_key.pub')
     # Reproduce an existing V9 installation: V10 used to fail despite an explicit config.

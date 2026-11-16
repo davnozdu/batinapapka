@@ -401,3 +401,42 @@ there are no periodic or per-file notification streams.
 This uses Telegram long polling and needs outbound HTTPS, not a published
 webhook port. Use one running instance with a given token, with no active
 webhook for that bot. API outages never stop the local download queue.
+
+## Automatic Cyberdrop image releases
+
+The **Update Cyberdrop image** workflow checks PyPI every hour at minute 17
+(UTC; GitHub schedules may be delayed). It resolves the newest non-yanked
+stable `X.Y.Z` release and compares it to the
+`io.batinapapka.cyberdrop.version` label on the published combined image.
+When a newer version exists, it calls the shared build workflow with that
+exact version and builds **only** `batinapapka-cyberdrop`.
+
+Unit tests, dependency auditing, and the real-container web/queue/SSH/restart
+checks run before publication. The smoke check also runs the bundled CLI with
+runtime self-updating disabled and verifies its exact version. Failed checks
+leave the previously published image in place. Successful builds update:
+
+- `ghcr.io/davnozdu/batinapapka-cyberdrop:latest`
+- `ghcr.io/davnozdu/batinapapka-cyberdrop:main`
+- `ghcr.io/davnozdu/batinapapka-cyberdrop:cyberdrop-X.Y.Z`
+
+The dependency version tag identifies the bundled Cyberdrop release; pin a
+manifest digest if you need immutable image contents across application code
+changes. Scheduled dependency refreshes do not rewrite the application release
+semver tags. No extra PAT, repository auto-commit, or third-party service is
+needed: publication uses the workflow's scoped `GITHUB_TOKEN`.
+
+You can also run **Update Cyberdrop image → Run workflow** manually. Enable
+`force` to rebuild the current version; otherwise a current/newer published
+version skips the build. Normal code/release builds resolve the latest stable
+Cyberdrop too, preventing a stale Dockerfile default from undoing an upstream
+refresh. Local builds default to 10.16.0, overridable with
+`--build-arg CYBERDROP_VERSION=...`.
+
+This publishes an image; it does not restart your deployment automatically.
+Pull/recreate the container as usual, retaining `/state` and `/videos`:
+
+```bash
+docker compose pull
+docker compose up -d
+```

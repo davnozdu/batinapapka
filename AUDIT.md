@@ -85,3 +85,19 @@ Telegram authorization, settings, button callbacks, replay protection and
 whole-job notifications/retry. A live getMe request verified the supplied bot
 token; the user opted to enter runtime configuration themselves, so no bot
 was activated and no live Telegram messages were sent during development.
+
+## Automatic upstream image refresh (2026-11-16)
+
+Added an hourly PyPI/GHCR comparison workflow and reusable exact-version builds.
+The checker skips prereleases/yanked releases, recognizes unlabelled legacy
+images, propagates registry/network failures, skips current versions and avoids
+scheduled downgrades. Build publication is serialized per image/ref. The
+combined image carries a machine-readable bundled-version label and a
+`cyberdrop-X.Y.Z` tag; the existing smoke test verifies the installed CLI version
+with self-updating disabled. No PAT or bot credentials are required in CI.
+Normal builds resolve the current stable version so later application pushes
+do not reinstall the old Dockerfile fallback. Local default updated from
+10.15.3 to 10.16.0.
+
+51 tests and actionlint validation passed locally. Real scheduled-workflow
+validation is performed by manual dispatch against the newly released 10.16.0.

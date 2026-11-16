@@ -1,0 +1,51 @@
+name: Update Cyberdrop image
+
+on:
+  schedule:
+    # Avoid the busy start of the hour. Times are UTC; GitHub may delay schedules.
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even when the published version is current
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cyberdrop-upstream-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      update_needed: ${{ steps.release.outputs.update_needed }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compare PyPI release with published image
+        id: release
+        env:
+          FORCE_REBUILD: ${{ inputs.force }}
+        run: |
+          args=()
+          if [ "$FORCE_REBUILD" = 'true' ]; then args+=(--force); fi
+          python scripts/check_cyberdrop_release.py "${args[@]}"
+
+  rebuild:
+    needs: check
+    if: needs.check.outputs.update_needed == 'true'
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    uses: ./.github/workflows/docker.yml
+    with:
+      cyberdrop_version: ${{ needs.check.outputs.version }}
+      cyberdrop_only: true
